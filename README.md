@@ -148,8 +148,11 @@ than any single bite.
 | `tools/replay.py` | Replays a recorded session through the live pipeline |
 | `docs/` | Contract, measurement protocol, bite detection, wiring, calibration |
 
-**Start here:** [`docs/engineering-notes.md`](docs/engineering-notes.md) — what was
-hard and how it was solved. [`docs/demo-script.md`](docs/demo-script.md) — the
+**Picking this up cold?** Start with [`HANDOFF.md`](HANDOFF.md) — current state,
+hard constraints, decisions already made, and what to do next.
+
+Also: [`docs/engineering-notes.md`](docs/engineering-notes.md) — what was hard and
+how it was solved. [`docs/demo-script.md`](docs/demo-script.md) — the
 ninety-second walkthrough.
 
 ## Hardware
