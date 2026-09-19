@@ -48,6 +48,90 @@ FOOD_MATRICES: Dict[str, FoodMatrix] = {
         correction_factor=0.60, 
         description="High potassium levels from root vegetables contribute roughly 40% of the electrical conductivity."
     ),
+    "soy_sauce": FoodMatrix(
+        id="soy_sauce",
+        name="Soy Sauce (USDA)",
+        correction_factor=0.92,
+        description="Very high sodium (~5500mg/100g) dominates the conductivity, but fermented soy provides some potassium."
+    ),
+    "tomato_soup": FoodMatrix(
+        id="tomato_soup",
+        name="Tomato Soup (USDA)",
+        correction_factor=0.75,
+        description="Tomatoes are rich in potassium (~200mg/100g) which contributes significantly to the EC alongside added salt."
+    ),
+    "pho_broth": FoodMatrix(
+        id="pho_broth",
+        name="Pho Broth (Vietnamese)",
+        correction_factor=0.58,
+        description="Bone-rich broth simmered for hours extracts high levels of calcium, magnesium, and potassium."
+    ),
+    "ramen_broth": FoodMatrix(
+        id="ramen_broth",
+        name="Tonkotsu Ramen Broth",
+        correction_factor=0.65,
+        description="Pork bone broth contains significant calcium and potassium, lowering the sodium-to-EC ratio."
+    ),
+    "bone_broth": FoodMatrix(
+        id="bone_broth",
+        name="Bone Broth",
+        correction_factor=0.50,
+        description="Extended simmering (especially with vinegar) extracts very high calcium and magnesium."
+    ),
+    "fish_sauce": FoodMatrix(
+        id="fish_sauce",
+        name="Fish Sauce",
+        correction_factor=0.94,
+        description="Extreme sodium content dominates, but fermented fish adds trace minerals."
+    ),
+    "clam_chowder": FoodMatrix(
+        id="clam_chowder",
+        name="Clam Chowder (New England)",
+        correction_factor=0.80,
+        description="Potatoes and clams both add potassium, while milk/cream add calcium."
+    ),
+    "minestrone": FoodMatrix(
+        id="minestrone",
+        name="Minestrone Soup",
+        correction_factor=0.70,
+        description="Beans and vegetables provide high potassium, magnesium, and calcium."
+    ),
+    "french_onion": FoodMatrix(
+        id="french_onion",
+        name="French Onion Soup",
+        correction_factor=0.68,
+        description="Beef stock base (high potassium) plus onions."
+    ),
+    "hot_and_sour": FoodMatrix(
+        id="hot_and_sour",
+        name="Hot and Sour Soup",
+        correction_factor=0.82,
+        description="Soy sauce base dominates, but bamboo shoots and mushrooms add potassium."
+    ),
+    "lentil_soup": FoodMatrix(
+        id="lentil_soup",
+        name="Lentil Soup",
+        correction_factor=0.65,
+        description="Lentils are extremely high in potassium, significantly altering the EC ratio."
+    ),
+    "butternut_squash": FoodMatrix(
+        id="butternut_squash",
+        name="Butternut Squash Soup",
+        correction_factor=0.62,
+        description="Squash is very potassium-rich, contributing heavily to conductivity."
+    ),
+    "sports_drink": FoodMatrix(
+        id="sports_drink",
+        name="Sports Drink (Isotonic)",
+        correction_factor=0.75,
+        description="Formulated with specific ratios of sodium, potassium, and magnesium."
+    ),
+    "pickle_juice": FoodMatrix(
+        id="pickle_juice",
+        name="Pickle Juice (Dill)",
+        correction_factor=0.90,
+        description="Very high sodium, but cucumbers contribute some potassium and calcium."
+    ),
 }
 
 def get_all_matrices() -> List[FoodMatrix]:

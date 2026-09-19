@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 
 interface FoodMatrix {
   id: string;
@@ -11,6 +11,7 @@ export function FoodMatrixSelector({ activeMealId, onChange }: { activeMealId: n
   const [matrices, setMatrices] = useState<FoodMatrix[]>([]);
   const [activeMatrix, setActiveMatrix] = useState<string>('default');
   const [loading, setLoading] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
 
   useEffect(() => {
     fetch(`/api/food-matrices`)
@@ -39,15 +40,31 @@ export function FoodMatrixSelector({ activeMealId, onChange }: { activeMealId: n
 
   const selected = matrices.find(m => m.id === activeMatrix);
 
+  const filteredMatrices = useMemo(() => {
+    if (!searchQuery.trim()) return matrices;
+    const lowerQ = searchQuery.toLowerCase();
+    return matrices.filter(m => m.name.toLowerCase().includes(lowerQ) || m.description.toLowerCase().includes(lowerQ));
+  }, [matrices, searchQuery]);
+
   return (
     <div className="card">
       <h2 style={{ marginTop: 0, marginBottom: '1rem', color: 'var(--text-primary)' }}>Food Matrix Calibration</h2>
       <p className="cap">
         Total ionic conductivity includes background minerals like potassium. Select your broth to apply a USDA-based correction factor and isolate the true sodium content.
       </p>
+
+      <input 
+        type="text" 
+        placeholder="Search USDA liquids (e.g. Soup, Broth, Sauce)..." 
+        value={searchQuery}
+        onChange={(e) => setSearchQuery(e.target.value)}
+        className="field"
+        style={{ width: '100%', marginBottom: '1rem' }}
+        disabled={!activeMealId}
+      />
       
-      <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '1rem' }}>
-        {matrices.map(m => (
+      <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '1rem', maxHeight: '150px', overflowY: 'auto', paddingRight: '8px' }}>
+        {filteredMatrices.map(m => (
           <button
             key={m.id}
             onClick={() => applyMatrix(m.id)}
@@ -65,6 +82,9 @@ export function FoodMatrixSelector({ activeMealId, onChange }: { activeMealId: n
             {m.name}
           </button>
         ))}
+        {filteredMatrices.length === 0 && (
+          <div style={{ color: 'var(--text-subtle)', fontSize: '0.9rem', fontStyle: 'italic' }}>No matches found.</div>
+        )}
       </div>
 
       {selected && (

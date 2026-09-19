@@ -401,7 +401,7 @@ def recompute_meal(meal_id: int) -> dict[str, Any]:
     """
     from .minerals import get_matrix
     with connect() as conn:
-        meal_row = conn.execute("SELECT food_matrix_id FROM meals WHERE id = ?", (meal_id,)).fetchone()
+        meal_row = conn.execute("SELECT food_matrix_id FROM meals WHERE mealId = ?", (meal_id,)).fetchone()
         matrix_id = meal_row["food_matrix_id"] if meal_row else "default"
         matrix = get_matrix(matrix_id)
         factor = matrix.correction_factor if matrix else 1.0
@@ -419,13 +419,6 @@ def recompute_meal(meal_id: int) -> dict[str, Any]:
         fast = sum(1 for b in bites if FLAG_FAST in b.get("flags", []))
 
         totals = {
-<<<<<<< HEAD
-            "bite_count": len(bites),
-            "total_sodium_mg": sum(b["sodium_mg"] * factor for b in bites),
-            "total_sodium_mg_low": sum(b["sodium_mg_low"] * factor for b in bites),
-            "total_sodium_mg_high": sum(b["sodium_mg_high"] * factor for b in bites),
-            "total_volume_ml": sum(b["volume_ml"] for b in bites),
-=======
             "biteCount": len(bites),
             "totalSodium": sum(b["sodiumEstimate"] for b in bites),
             "total_sodium_mg_low": sum(b["sodium_mg_low"] for b in bites),
@@ -436,7 +429,6 @@ def recompute_meal(meal_id: int) -> dict[str, Any]:
             # A placeholder rule, like the LED thresholds under it: it reports
             # what the device saw and claims nothing clinical.
             "paceFlag": bool(bites) and fast > len(bites) / 2,
->>>>>>> origin/main
         }
         conn.execute(
             """UPDATE meals SET biteCount = :biteCount, totalSodium = :totalSodium,
@@ -449,6 +441,13 @@ def recompute_meal(meal_id: int) -> dict[str, Any]:
                 WHERE mealId = :mealId""",
             {**totals, "mealId": meal_id},
         )
+        conn.commit()
+
+        # The AI endpoints expect my snake_case totals, so we alias them here
+        totals["bite_count"] = totals["biteCount"]
+        totals["total_sodium_mg"] = totals["totalSodium"]
+        totals["total_volume_ml"] = totals["total_weight_g"]
+
         return totals
 
 

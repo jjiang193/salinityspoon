@@ -529,7 +529,7 @@ def echo_debrief(req: EchoDebriefRequest) -> dict:
     bites = meal_data["bites"]
     pace = 0
     if len(bites) > 1:
-        times = [datetime.fromisoformat(b["ts_utc"]) for b in bites]
+        times = [datetime.fromisoformat(b["timestamp"]) for b in bites]
         total_seconds = (times[-1] - times[0]).total_seconds()
         pace = total_seconds / (len(bites) - 1)
         
@@ -562,7 +562,7 @@ def echo_chat(req: EchoChatRequest) -> dict:
     bites = meal_data["bites"]
     pace = 0
     if len(bites) > 1:
-        times = [datetime.fromisoformat(b["ts_utc"]) for b in bites]
+        times = [datetime.fromisoformat(b["timestamp"]) for b in bites]
         total_seconds = (times[-1] - times[0]).total_seconds()
         pace = total_seconds / (len(bites) - 1)
         
