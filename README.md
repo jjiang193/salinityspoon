@@ -138,11 +138,17 @@ python tools/replay.py backend/recordings/<file>.jsonl --loop
 
 ### Volume is calibrated, not weighed
 
-There is no load cell. Scoop volume is calibrated per user, and the honest
-consequence is stated everywhere a number appears: **per bite ≈ ±27%, per meal
-≈ ±10%**, because random scoop variation cancels as √n across a meal. The meal
-total — what a clinician actually reads — is roughly three times more accurate
-than any single bite.
+The main spoon (`firmware/spoon/`) has no load cell. Scoop volume is calibrated
+per user, and the honest consequence is stated everywhere a number appears:
+**per bite ≈ ±27%, per meal ≈ ±10%**, because random scoop variation cancels as
+√n across a meal. The meal total — what a clinician actually reads — is roughly
+three times more accurate than any single bite.
+
+A second firmware, `firmware/loadcell/`, weighs each bite with an HX711 load cell
+instead and sends the same `bite/v2` with `volume_source: "load_cell"`. It runs on
+a real board (all four sensors read), but has no Wi-Fi yet and must still adopt
+the 40 °C interlock and the quadratic EC→NaCl curve before it sends anything —
+see [`docs/loadcell/aws-handoff.md`](docs/loadcell/aws-handoff.md).
 
 ---
 
@@ -151,6 +157,7 @@ than any single bite.
 | Path | What it is |
 |---|---|
 | `firmware/spoon/` | ESP32 sketch — sensors, bite detection, pace LED, WebSocket |
+| `firmware/loadcell/` | Alternative ESP32 sketch that weighs each bite (HX711); calibration sketches; bite simulation in `test/` ([README](firmware/loadcell/README.md)) |
 | `backend/app/` | FastAPI — ingest, broadcast, meal segmentation, SQLite |
 | `dashboard/` | React + Vite + TypeScript |
 | `tools/mock_spoon.py` | Simulator running the same state machine |
@@ -182,6 +189,10 @@ WebSockets (Markus Sattler) ·
 
 Board: **ESP32 Dev Module**. No COM port? Install the Silicon Labs CP210x VCP
 driver — the HiLetgo board uses a CP2102.
+
+The load-cell spoon (`firmware/loadcell/`) adds a 100 g load cell on an **HX711**
+(DT → GPIO16, SCK → GPIO17), uses a single red LED on GPIO25, and needs the
+`HX711` library by Bogdan Necula and `DFRobot_EC` in place of `DFRobot_ESP_EC`.
 
 ---
 
