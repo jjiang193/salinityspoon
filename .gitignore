@@ -18,3 +18,6 @@ firmware/spoon/secrets.h
 .DS_Store
 backend/recordings/
 firmware/test/test_firmware
+
+# Load-cell firmware simulation binary
+firmware/loadcell/test/bite_sim
