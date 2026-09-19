@@ -22,7 +22,7 @@ export interface Projection {
   mgPerBite: number;
   /** Sodium rate, mg per minute. Null until two bites have been logged. */
   mgPerMinute: number | null;
-  /** Whole bites remaining before today's total reaches the FDA limit. */
+  /** Whole bites remaining before today's total reaches the patient's target. */
   bitesToLimit: number | null;
   /** Minutes to the limit at the current rate. Null if the rate is unknown. */
   minutesToLimit: number | null;
@@ -30,21 +30,23 @@ export interface Projection {
   overLimit: boolean;
 }
 
-export function project(bites: Bite[], consumedTodayMg: number): Projection | null {
+export function project(
+  bites: Bite[], consumedTodayMg: number, limitMg: number = FDA_DAILY_LIMIT_MG,
+): Projection | null {
   if (bites.length === 0) return null;
 
   const window = bites.slice(0, RATE_WINDOW);
-  const mgPerBite = window.reduce((a, b) => a + b.sodium_mg, 0) / window.length;
+  const mgPerBite = window.reduce((a, b) => a + b.sodiumEstimate, 0) / window.length;
 
   // Gaps come from the device, which measures them between confirmed bites.
   const gaps = window
-    .map((b) => b.seconds_since_prev_bite)
+    .map((b) => b.biteIntervalSec)
     .filter((g): g is number => g != null && g > 0);
 
   const meanGapS = gaps.length ? gaps.reduce((a, g) => a + g, 0) / gaps.length : null;
   const mgPerMinute = meanGapS ? (mgPerBite / meanGapS) * 60 : null;
 
-  const remaining = FDA_DAILY_LIMIT_MG - consumedTodayMg;
+  const remaining = limitMg - consumedTodayMg;
   const overLimit = remaining <= 0;
 
   const bitesToLimit = overLimit || mgPerBite <= 0

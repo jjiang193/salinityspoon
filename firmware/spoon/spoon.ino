@@ -158,25 +158,31 @@ void publishBite(const BiteResult& r) {
   PaceColour pace = PaceLed::forGap(gap);
   led.show(pace);
 
-  StaticJsonDocument<640> doc;
-  doc["schema"]            = "bite/v1";
-  doc["device_id"]         = DEVICE_ID;
+  StaticJsonDocument<768> doc;   // 640 before bite/v2 added the flags array
+  // Wire names follow docs/telemetry-schema.md: NaTrack's camelCase where
+  // NaTrack names the field, this repo's snake_case where it does not.
+  doc["schema"]            = "bite/v2";
+  doc["deviceId"]          = DEVICE_ID;
   doc["bite_id"]           = biteId;
-  doc["ts_utc"]            = isoTimestamp();
-  doc["ec25_ms_cm"]        = r.ec25;
-  doc["temp_c"]            = r.tempC;
+  doc["timestamp"]         = isoTimestamp();
+  doc["salinityIndex"]     = r.ec25;          // mS/cm at 25 C
+  doc["tempC"]             = r.tempC;
   doc["salinity_g_l"]      = gPerL;
   doc["salinity_source"]   = "measured";
   doc["dilution_factor"]   = DILUTION_FACTOR;
-  doc["volume_ml"]         = VOLUME_ML_MEAN;
+  // This spoon does not weigh. Grams are the calibrated scoop at 1.0 g/mL,
+  // and volume_source says so.
+  doc["weightGrams"]       = VOLUME_ML_MEAN;
   doc["volume_source"]     = VOLUME_SOURCE;
-  doc["sodium_mg"]         = salinity::sodiumMg(gPerL, VOLUME_ML_MEAN);
+  doc["sodiumEstimate"]    = salinity::sodiumMg(gPerL, VOLUME_ML_MEAN);
   doc["sodium_mg_low"]     = salinity::sodiumMg(gPerL, max(0.0f, VOLUME_ML_MEAN - VOLUME_ML_SD));
   doc["sodium_mg_high"]    = salinity::sodiumMg(gPerL, VOLUME_ML_MEAN + VOLUME_ML_SD);
   doc["quality"]           = r.quality;
   doc["ec_sample_count"]   = r.sampleCount;
-  if (gap >= 0) doc["seconds_since_prev_bite"] = gap;
+  if (gap >= 0) doc["biteIntervalSec"] = gap;
   doc["pace"]              = PaceLed::name(pace);
+  JsonArray flags = doc.createNestedArray("flags");   // ArduinoJson v6 idiom
+  if (strcmp(PaceLed::name(pace), "red") == 0) flags.add("fast");
   doc["fw_version"]        = FW_VERSION;
 
   char buf[640];
@@ -187,16 +193,16 @@ void publishBite(const BiteResult& r) {
 
 void publishSample(const sensors_event_t& a, const sensors_event_t& g) {
   StaticJsonDocument<512> doc;
-  doc["schema"]        = "sample/v1";
-  doc["device_id"]     = DEVICE_ID;
+  doc["schema"]        = "sample/v2";
+  doc["deviceId"]      = DEVICE_ID;
   doc["seq"]           = seq++;
   doc["uptime_ms"]     = millis();
 
-  if (isnan(lastTempC)) doc["temp_c"] = nullptr;
-  else                  doc["temp_c"] = lastTempC;
+  if (isnan(lastTempC)) doc["tempC"] = nullptr;
+  else                  doc["tempC"] = lastTempC;
   doc["temp_in_range"] = salinity::tempInRange(lastTempC);
 
-  doc["ec25_ms_cm"]    = lastEc25;
+  doc["salinityIndex"] = lastEc25;
   doc["salinity_g_l"]  = salinity::ecToGramsPerLitre(lastEc25);
 
   JsonObject imu = doc.createNestedObject("imu");

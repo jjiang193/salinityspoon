@@ -1,20 +1,36 @@
 /* Design tokens. Dark mode is a selected set of steps from the same ramps,
    not an automatic inversion. Declared under both the OS media query and the
-   explicit [data-theme] scope so a manual toggle wins either way. */
+   explicit [data-theme] scope so a manual toggle wins either way.
+
+   Light is the clinical theme: white cards on a cool blue-grey plane, navy ink.
+   It is what a clinician's other software looks like, and on a ward monitor at
+   noon it is the legible one. index.html applies it by default; the OS media
+   query below only decides anything if that script did not run. */
 :root {
   color-scheme: light;
-  --plane:          #f9f9f7;
-  --surface:        #fcfcfb;
-  --text-primary:   #0b0b0b;
-  --text-secondary: #52514e;
-  --text-muted:     #898781;
-  --grid:           #e1e0d9;
-  --axis:           #c3c2b7;
-  --border:         rgba(11, 11, 11, 0.10);
+  --plane:          #f3f6fb;
+  --surface:        #ffffff;
+  --text-primary:   #0d2137;
+  --text-secondary: #46576c;
+  --text-muted:     #7b8a9e;
+  --grid:           #e4eaf2;
+  --axis:           #c4cfdd;
+  --border:         rgba(13, 33, 55, 0.12);
+
+  /* UI accent: buttons, focus rings, the active tab. Deliberately NOT the data
+     blue below - a button the colour of a series reads as part of the chart.
+     White on --accent is 6.6:1. */
+  --accent:         #0b5cad;
+  --accent-hover:   #094c90;
+  --accent-soft:    #e7f0fb;
+  --on-accent:      #ffffff;
+  --card-shadow:    0 1px 2px rgba(13, 33, 55, 0.05), 0 1px 3px rgba(13, 33, 55, 0.04);
 
   /* Categorical slots 1 and 2. Validated: CVD dE 24.7, normal dE 33.6. */
   --series-salinity: #2a78d6;
   --series-temp:     #eb6834;
+  /* Slot 3. Self-reported intake. Validated against slot 1: CVD dE 23.1. */
+  --series-manual:   #1baf7a;
 
   /* Status roles - reserved, never reused as a series color. */
   --status-good:     #0ca30c;
@@ -40,8 +56,14 @@
     --grid:           #2c2c2a;
     --axis:           #383835;
     --border:         rgba(255, 255, 255, 0.10);
+    --accent:         #3987e5;
+    --accent-hover:   #5598e7;
+    --accent-soft:    rgba(57, 135, 229, 0.16);
+    --on-accent:      #ffffff;
+    --card-shadow:    none;
     --series-salinity: #3987e5;
     --series-temp:     #d95926;
+    --series-manual:   #199e70;
     --band-fill: rgba(57, 135, 229, 0.12);
     --limit-line: #e66767;
   }
@@ -58,8 +80,14 @@
   --grid:           #2c2c2a;
   --axis:           #383835;
   --border:         rgba(255, 255, 255, 0.10);
+  --accent:         #3987e5;
+  --accent-hover:   #5598e7;
+  --accent-soft:    rgba(57, 135, 229, 0.16);
+  --on-accent:      #ffffff;
+  --card-shadow:    none;
   --series-salinity: #3987e5;
   --series-temp:     #d95926;
+  --series-manual:   #199e70;
   --band-fill: rgba(57, 135, 229, 0.12);
 }
 
@@ -77,9 +105,24 @@ body {
 
 header.masthead {
   display: flex; align-items: baseline; justify-content: space-between;
-  gap: 16px; flex-wrap: wrap; margin-bottom: 20px;
+  gap: 16px; flex-wrap: wrap; margin-bottom: 14px;
 }
 .masthead h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
+.brand { display: flex; align-items: center; gap: 12px; }
+.brand-mark {
+  width: 36px; height: 36px; border-radius: 9px; flex: none;
+  background: var(--accent); color: var(--on-accent);
+  display: grid; place-items: center;
+}
+.masthead-tools { display: flex; align-items: center; gap: 8px; }
+.theme-toggle {
+  display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+  font: inherit; font-size: 11.5px; font-weight: 500; padding: 3px 9px;
+  border-radius: 4px; border: 1px solid var(--border);
+  background: transparent; color: var(--text-secondary);
+}
+.theme-toggle:hover { color: var(--accent); border-color: var(--accent); }
+.theme-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .masthead .sub { color: var(--text-secondary); font-size: 13px; margin: 2px 0 0; }
 
 .card {
@@ -87,6 +130,7 @@ header.masthead {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 16px 18px;
+  box-shadow: var(--card-shadow);
 }
 .card h2 {
   font-size: 13px; font-weight: 600; margin: 0 0 3px;
@@ -226,6 +270,7 @@ td {
 }
 td.primary { color: var(--text-primary); font-weight: 500; }
 th.num, td.num { text-align: right; padding-right: 0; }
+th.num.pad, td.num.pad { padding-right: 22px; }
 .empty { color: var(--text-muted); font-size: 13px; padding: 20px 0; text-align: center; }
 
 /* --- Tooltip --- */
@@ -266,12 +311,13 @@ th.num, td.num { text-align: right; padding-right: 0; }
   padding: 8px 10px; font-size: 13px; font-family: inherit;
 }
 .field-sm { flex: 0 1 96px; min-width: 80px; }
-.field:focus-visible { outline: 2px solid var(--series-salinity); outline-offset: 1px; }
+.field:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .btn {
-  background: var(--series-salinity); color: #fff; border: 0; border-radius: 8px;
+  background: var(--accent); color: var(--on-accent); border: 0; border-radius: 8px;
   padding: 9px 16px; font-size: 13px; font-weight: 600; cursor: pointer;
   font-family: inherit;
 }
+.btn:hover:not(:disabled) { background: var(--accent-hover); }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .btn:focus-visible { outline: 2px solid var(--text-primary); outline-offset: 2px; }
 .btn-link {
@@ -293,5 +339,157 @@ th.num, td.num { text-align: right; padding-right: 0; }
 .diag summary::-webkit-details-marker { display: none; }
 .diag summary::before { content: '▸ '; }
 .diag[open] summary::before { content: '▾ '; }
-.diag summary:focus-visible { outline: 2px solid var(--series-salinity); outline-offset: 3px; }
+.diag summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .diag > div { margin-top: 14px; }
+
+/* --- Primary tabs: who is looking. Underlined in the UI accent, never the
+       data blue - a tab the colour of a series reads as part of the chart. --- */
+.tabs {
+  display: flex; align-items: flex-end; gap: 4px;
+  border-bottom: 1px solid var(--border); margin-bottom: 22px;
+}
+.tabs a {
+  padding: 9px 14px 10px; margin-bottom: -1px;
+  font-size: 13.5px; font-weight: 500; text-decoration: none;
+  color: var(--text-secondary); border-bottom: 2px solid transparent;
+}
+.tabs a:hover { color: var(--text-primary); }
+.tabs a[aria-current='page'] {
+  color: var(--accent); font-weight: 600;
+  border-bottom-color: var(--accent);
+}
+.tabs a:focus-visible, .segmented a:focus-visible, .row-link:focus-visible, .crumb:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px;
+}
+.tabs-note {
+  margin-left: auto; padding-bottom: 10px;
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.05em;
+  text-transform: uppercase; color: var(--text-muted);
+}
+@media (max-width: 620px) { .tabs-note { display: none; } }
+
+/* --- Secondary tabs, inside the patient view --- */
+.segmented {
+  display: inline-flex; gap: 2px; padding: 3px; margin-bottom: 16px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+}
+.segmented a {
+  padding: 6px 14px; border-radius: 6px; text-decoration: none;
+  font-size: 12.5px; font-weight: 500; color: var(--text-secondary);
+}
+.segmented a[aria-current='page'] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+
+/* --- View heading --- */
+.view-head {
+  display: flex; align-items: flex-end; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap; margin-bottom: 16px;
+}
+.view-title { font-size: 22px; font-weight: 600; letter-spacing: -0.015em; margin: 0; }
+.view-sub { font-size: 13px; color: var(--text-secondary); margin: 4px 0 0; }
+.view-sub strong { color: var(--text-primary); font-weight: 600; }
+.crumb {
+  display: inline-block; margin-bottom: 12px; font-size: 12.5px;
+  color: var(--text-secondary); text-decoration: none;
+}
+.crumb:hover { color: var(--text-primary); }
+
+.switcher { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-secondary); }
+.switcher .field { flex: none; min-width: 170px; background: var(--surface); }
+
+/* --- Stat tiles: neutral by construction. See components/StatTile.tsx. --- */
+.tiles { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+.tile {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 14px 16px;
+  box-shadow: var(--card-shadow);
+}
+.tile-label {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.07em;
+  text-transform: uppercase; color: var(--text-muted);
+}
+.tile-value {
+  font-family: var(--mono); font-size: 28px; font-weight: 600; line-height: 1.1;
+  letter-spacing: -0.03em; margin-top: 8px; font-variant-numeric: tabular-nums;
+}
+.tile-value small {
+  font-family: var(--sans); font-size: 13px; font-weight: 500;
+  letter-spacing: 0; color: var(--text-secondary);
+}
+.tile-note { font-size: 12px; color: var(--text-secondary); margin-top: 5px; line-height: 1.4; }
+
+/* --- Roster --- */
+.roster td { padding-top: 12px; padding-bottom: 12px; vertical-align: middle; }
+.roster th, .roster td { padding-right: 18px; }
+.roster tbody tr { cursor: pointer; }
+.roster tbody tr:hover td { background: color-mix(in srgb, var(--grid) 45%, transparent); }
+.roster tbody tr:last-child td { border-bottom: 0; }
+.row-link { color: var(--text-primary); font-weight: 600; font-size: 13.5px; text-decoration: none; }
+.row-link:hover { color: var(--accent); text-decoration: underline; }
+.sub-line { font-size: 11.5px; color: var(--text-muted); margin-top: 2px; white-space: nowrap; }
+.roster td .primary, td .primary { color: var(--text-primary); font-weight: 500; }
+.chip-stack { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.chip-stack .pill, td .pill { white-space: nowrap; }
+.spark { display: block; }
+.muted { color: var(--text-muted); }
+.nowrap { white-space: nowrap; }
+
+.footnote {
+  font-size: 12px; line-height: 1.55; color: var(--text-secondary);
+  margin: 18px 2px 0; max-width: 860px;
+}
+.footnote strong { color: var(--text-primary); font-weight: 600; }
+
+/* --- Chart legend: identity is never colour alone, and text stays in ink --- */
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 11.5px; color: var(--text-secondary); margin-bottom: 6px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+.legend i.dash { width: 14px; height: 0; border-radius: 0; border-top: 1.5px dashed var(--text-secondary); }
+
+.grid.wide-narrow { grid-template-columns: 1.9fr 1fr; }
+@media (max-width: 860px) { .grid.wide-narrow { grid-template-columns: 1fr; } }
+
+/* --- Controls --- */
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.btn-quiet {
+  background: transparent; color: var(--text-primary);
+  border: 1px solid var(--axis); text-decoration: none; display: inline-block;
+  padding: 7px 13px; font-size: 12.5px;
+}
+.btn-quiet:hover { background: var(--accent-soft); }
+.pill-btn { cursor: pointer; font-family: inherit; }
+.pill-btn:hover { border-color: var(--axis); }
+.pill-btn[aria-pressed='true'] { border-color: var(--accent); background: var(--accent-soft); }
+.pill-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.unit-suffix { font-size: 12.5px; color: var(--text-secondary); margin-right: auto; }
+
+/* Information, not a warning: no status colour on the border. */
+.banner-info {
+  background: var(--surface); border: 1px solid var(--axis);
+  border-radius: 10px; padding: 12px 16px; margin-bottom: 16px; font-size: 13px;
+}
+
+.status-inline { display: none; margin-top: 6px; }
+@media (max-width: 720px) { .status-inline { display: block; } }
+
+/* --- Range toggle: buttons, where the patient sub-nav is links --- */
+.segmented.small { margin-bottom: 0; padding: 2px; }
+.segmented button {
+  padding: 4px 11px; border: 0; border-radius: 6px; cursor: pointer;
+  background: transparent; font: inherit; font-size: 12px; font-weight: 500;
+  color: var(--text-secondary);
+}
+.segmented button[aria-pressed='true'] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.segmented button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.card-head h2 { margin: 0; }
+
+/* --- Meal rows open onto their bites --- */
+.meals tbody tr:not(.drill) { cursor: pointer; }
+.meals tbody tr:not(.drill):hover td { background: color-mix(in srgb, var(--grid) 45%, transparent); }
+.row-toggle {
+  border: 0; background: none; padding: 0 6px 0 0; cursor: pointer;
+  color: var(--text-muted); font-size: 10px; font-family: inherit;
+}
+.row-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+tr.drill > td { padding: 4px 0 16px; background: var(--plane); }
+tr.drill .card { border: 0; box-shadow: none; background: transparent; }
+.unit-sep { color: var(--text-muted); }

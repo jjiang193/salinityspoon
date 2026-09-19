@@ -42,10 +42,11 @@ export function markerFor(ind: Indicator): string {
 
 export function connection(connected: boolean): Indicator {
   // Being connected is the expected case, so it earns no colour. Losing the
-  // spoon mid-meal does.
+  // feed mid-meal does. It is the dashboard's link to the backend: whether the
+  // spoon itself is sending is what the Sensor card reports.
   return connected
-    ? { tier: 'ambient', label: 'Spoon connected' }
-    : { tier: 'attention', label: 'Spoon disconnected', role: 'critical' };
+    ? { tier: 'ambient', label: 'Live feed connected' }
+    : { tier: 'attention', label: 'Live feed disconnected', role: 'critical' };
 }
 
 export function probeRange(inRange: boolean | null): Indicator {
@@ -72,10 +73,83 @@ export function capture(counting: boolean): Indicator {
 export function dailyLoad(pctOfLimit: number): Indicator {
   // Crossing the daily limit is genuinely actionable; being under it is not.
   if (pctOfLimit >= 100)
-    return { tier: 'attention', label: `${pctOfLimit.toFixed(0)}% of daily limit`, role: 'critical' };
+    return { tier: 'attention', label: `${pctOfLimit.toFixed(0)}% of daily target`, role: 'critical' };
   if (pctOfLimit >= 80)
-    return { tier: 'attention', label: `${pctOfLimit.toFixed(0)}% of daily limit`, role: 'warning' };
-  return { tier: 'ambient', label: `${pctOfLimit.toFixed(0)}% of daily limit` };
+    return { tier: 'attention', label: `${pctOfLimit.toFixed(0)}% of daily target`, role: 'warning' };
+  return { tier: 'ambient', label: `${pctOfLimit.toFixed(0)}% of daily target` };
+}
+
+/** Days without a log before a clinician should hear about it. */
+export const LAPSE_DAYS = 3;
+
+/**
+ * One chip per roster row, so a clinician can sort a panel by eye.
+ *
+ * A roster is where colour rationing matters most: five patients each wearing
+ * three coloured chips is the sixteen-chip problem again, one level up. So a
+ * row gets exactly one indicator - the most pressing thing true of it - and a
+ * patient who is simply on target gets no colour at all.
+ *
+ * Order is by what a clinician can act on soonest. Over target *today* can
+ * still be changed at dinner. A high weekly average is the reason the patient
+ * is being monitored. A label flag outranks a lapse because it can be true of a
+ * patient whose sodium looks perfect - a low-sodium product that measures like
+ * ordinary broth is probably potassium chloride, and the sodium columns will
+ * never show it. Upward drift is NaTrack's flag: this week's mean well above
+ * last week's, in a patient still under target - the one case where acting
+ * early is possible. A lapse in logging means every other number on the row is
+ * stale, which is its own reason to call.
+ */
+export function rosterStatus(s: {
+  pctToday: number;
+  pctAvg: number | null;
+  daysSinceLog: number | null;
+  flaggedMeals: number;
+  upwardDrift: boolean;
+  driftPct: number | null;
+}): Indicator {
+  if (s.pctToday >= 100)
+    return { tier: 'attention', label: 'Over target today', role: 'critical' };
+  if (s.pctAvg !== null && s.pctAvg >= 100)
+    return { tier: 'attention', label: 'Above target', role: 'warning' };
+  if (s.flaggedMeals > 0)
+    return {
+      tier: 'attention', role: 'warning',
+      label: `Label flag · ${s.flaggedMeals} meal${s.flaggedMeals === 1 ? '' : 's'}`,
+    };
+  if (s.daysSinceLog === null)
+    return { tier: 'ambient', label: 'No data yet' };
+  // A lapsed patient's drift is a comparison of stale weeks; the lapse is the news.
+  if (s.upwardDrift && s.daysSinceLog < LAPSE_DAYS)
+    return {
+      tier: 'attention', role: 'warning',
+      label: `Trending up · +${(s.driftPct ?? 0).toFixed(0)}%`,
+    };
+  if (s.daysSinceLog >= LAPSE_DAYS)
+    return { tier: 'attention', label: `No log for ${s.daysSinceLog} days`, role: 'warning' };
+  if (s.pctAvg !== null && s.pctAvg >= 90)
+    return { tier: 'advisory', label: 'Near target' };
+  return { tier: 'ambient', label: 'Within target' };
+}
+
+/** Sort key for the roster: most pressing first. */
+export function urgency(ind: Indicator): number {
+  if (ind.tier === 'attention') return ind.role === 'critical' ? 0 : 1;
+  return ind.tier === 'advisory' ? 2 : 3;
+}
+
+export function mealPace(paceFlag: boolean): Indicator {
+  // NaTrack's paceFlag: most of the meal's bites were flagged fast by the
+  // device. Reported, not coloured - the thresholds under it are placeholders,
+  // and the evidence on eating speed concerns energy intake, not sodium.
+  return paceFlag
+    ? { tier: 'advisory', label: 'Fast pace' }
+    : { tier: 'ambient', label: 'Steady' };
+}
+
+export function mealInProgress(): Indicator {
+  // Eating is what the spoon is for. Worth noting on a roster, never alarming.
+  return { tier: 'advisory', label: 'In a meal now' };
 }
 
 export function mealVerdict(pctOfLimit: number): Indicator {

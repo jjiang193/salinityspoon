@@ -1,11 +1,12 @@
 import { MealTotals } from '../types';
-import { FDA_DAILY_LIMIT_MG } from '../lib/sodium';
 import * as sev from '../lib/severity';
 import { Chip, Fact } from './Chip';
 
 interface Props {
   totals: MealTotals | null;
   activeMealId: number | null;
+  /** The patient's daily target, set by their care team. */
+  targetMg: number;
 }
 
 /**
@@ -15,14 +16,14 @@ interface Props {
  * The range is shown, always. Scoop volume is estimated, not weighed, and a
  * point estimate with no error bar would overclaim what this hardware can do.
  */
-export function MealHero({ totals, activeMealId }: Props) {
+export function MealHero({ totals, activeMealId, targetMg }: Props) {
   const live = activeMealId !== null;
-  const sodium = totals?.total_sodium_mg ?? 0;
+  const sodium = totals?.totalSodium ?? 0;
   const low = totals?.total_sodium_mg_low ?? 0;
   const high = totals?.total_sodium_mg_high ?? 0;
-  const bites = totals?.bite_count ?? 0;
+  const bites = totals?.biteCount ?? 0;
 
-  const pctOfLimit = (sodium / FDA_DAILY_LIMIT_MG) * 100;
+  const pctOfLimit = (sodium / targetMg) * 100;
 
   return (
     <section className="card">
@@ -40,13 +41,13 @@ export function MealHero({ totals, activeMealId }: Props) {
       {bites > 0 && (
         <p className="hero-range">
           Range <strong>{Math.round(low).toLocaleString()}–{Math.round(high).toLocaleString()} mg</strong>
-          {' '}· scoop volume is estimated, not weighed
+          {' '}· the portion is a calibrated scoop, not weighed
         </p>
       )}
 
       <div className="pill-row" style={{ marginTop: 14 }}>
         <Chip indicator={sev.mealVerdict(pctOfLimit)} />
-        <Fact>{pctOfLimit.toFixed(0)}% of the 2,300 mg daily limit</Fact>
+        <Fact>{pctOfLimit.toFixed(0)}% of the {targetMg.toLocaleString()} mg daily target</Fact>
       </div>
 
       <p className="hero-sub">

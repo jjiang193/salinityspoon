@@ -19,7 +19,7 @@ tell. It is also how you tune thresholds without standing over a bowl.
 
 Timestamps are shifted to now by default. Without that, replayed bites land in
 the past: "today's intake" misses them, meal segmentation sees one enormous gap,
-and the (device_id, ts_utc, bite_id) uniqueness guard silently drops the second
+and the (deviceId, timestamp, bite_id) uniqueness guard silently drops the second
 replay as a duplicate. Shifting fixes all three.
 """
 
@@ -57,11 +57,11 @@ def shift_timestamps(events: list[dict], device_suffix: str | None) -> list[dict
     out = []
     for e, original in zip(events, stamps):
         ev = dict(e["event"])
-        if "ts_utc" in ev:
-            ts = datetime.fromisoformat(ev["ts_utc"]) + offset
-            ev["ts_utc"] = ts.isoformat(timespec="milliseconds")
-        if device_suffix and "device_id" in ev:
-            ev["device_id"] = f"{ev['device_id']}{device_suffix}"
+        if "timestamp" in ev:
+            ts = datetime.fromisoformat(ev["timestamp"].replace("Z", "+00:00")) + offset
+            ev["timestamp"] = ts.isoformat(timespec="milliseconds")
+        if device_suffix and "deviceId" in ev:
+            ev["deviceId"] = f"{ev['deviceId']}{device_suffix}"
         out.append({"recorded_at": (original + offset).isoformat(), "event": ev})
     return out
 
@@ -102,7 +102,7 @@ async def play(args: argparse.Namespace) -> None:
                 if e["event"].get("schema") == "bite/v1":
                     b = e["event"]
                     print(f"  bite #{b['bite_id']}: {b['salinity_g_l']:.2f} g/L, "
-                          f"{b['sodium_mg']:.1f} mg Na")
+                          f"{b['sodiumEstimate']:.1f} mg Na")
 
             print(f"  replayed {sent} events")
 
@@ -125,7 +125,7 @@ def main() -> None:
     p.add_argument("--keep-times", action="store_true",
                    help="do not shift timestamps to now (see module docstring)")
     p.add_argument("--device-suffix", default="-replay",
-                   help="appended to device_id so replays are distinguishable")
+                   help="appended to deviceId so replays are distinguishable")
     args = p.parse_args()
 
     try:

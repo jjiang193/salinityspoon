@@ -14,7 +14,7 @@ function SaltTip({ active, payload, label }: any) {
       <div className="tip-t">{clockTime(label)}</div>
       <div className="tip-row">
         <span className="swatch" style={{ background: 'var(--series-salinity)' }} />
-        {p.salt_pct.toFixed(3)}% salt · {p.ec25_ms_cm.toFixed(2)} mS/cm
+        {p.salt_pct.toFixed(3)}% salt · {p.salinityIndex.toFixed(2)} mS/cm
       </div>
       <div className="tip-note">
         {counts ? `${p.state.toLowerCase()} · counts toward a bite`
