@@ -7,6 +7,7 @@ so binding to localhost makes the spoon invisible.
 """
 
 import json
+from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -271,6 +272,101 @@ def label_check(req: LabelCheckRequest) -> dict:
         raise HTTPException(400, "unknown claim")
     return labels.check(req.salinity_g_l, req.label_claim, req.serving_ml).__dict__
 
+# --- Minerals & AI -----------------------------------------------------------
+from .minerals import get_all_matrices, get_matrix, generate_echo_debrief
+
+@app.get("/api/food-matrices")
+def list_food_matrices() -> list[dict]:
+    return [m.model_dump() for m in get_all_matrices()]
+
+class SetMatrixRequest(BaseModel):
+    matrix_id: str
+
+@app.post("/api/meals/active/matrix")
+def set_active_meal_matrix(req: SetMatrixRequest) -> dict:
+    if meals.meal_id is None:
+        raise HTTPException(409, "no active meal")
+    matrix = get_matrix(req.matrix_id)
+    if not matrix:
+        raise HTTPException(400, f"unknown matrix id {req.matrix_id}")
+    
+    store.set_meal_matrix(meals.meal_id, req.matrix_id)
+    totals = store.recompute_meal(meals.meal_id)
+    return {"meal_id": meals.meal_id, "matrix_id": req.matrix_id, "totals": totals}
+
+class EchoDebriefRequest(BaseModel):
+    meal_id: Optional[int] = None
+
+@app.post("/api/ai/echo-debrief")
+def echo_debrief(req: EchoDebriefRequest) -> dict:
+    target_meal = req.meal_id or meals.meal_id
+    if not target_meal:
+        raise HTTPException(404, "no meal found to debrief")
+        
+    meal_data = store.get_meal(target_meal)
+    if not meal_data:
+        raise HTTPException(404, "meal not found")
+        
+    meal = meal_data["meal"]
+    bites = meal_data["bites"]
+    pace = 0
+    if len(bites) > 1:
+        times = [datetime.fromisoformat(b["ts_utc"]) for b in bites]
+        total_seconds = (times[-1] - times[0]).total_seconds()
+        pace = total_seconds / (len(bites) - 1)
+        
+    stats = {
+        "total_sodium_mg": meal["total_sodium_mg"],
+        "bite_count": meal["bite_count"],
+        "average_pace_seconds": pace
+    }
+    
+    debrief = generate_echo_debrief(stats)
+    return {"debrief": debrief}
+
+
+class EchoChatRequest(BaseModel):
+    meal_id: Optional[int] = None
+    message: str
+
+@app.post("/api/ai/echo-chat")
+def echo_chat(req: EchoChatRequest) -> dict:
+    from .minerals import chat_with_echo
+    target_meal = req.meal_id or meals.meal_id
+    if not target_meal:
+        raise HTTPException(404, "no active meal context")
+        
+    meal_data = store.get_meal(target_meal)
+    if not meal_data:
+        raise HTTPException(404, "meal not found")
+        
+    meal = meal_data["meal"]
+    bites = meal_data["bites"]
+    pace = 0
+    if len(bites) > 1:
+        times = [datetime.fromisoformat(b["ts_utc"]) for b in bites]
+        total_seconds = (times[-1] - times[0]).total_seconds()
+        pace = total_seconds / (len(bites) - 1)
+        
+    stats = {
+        "total_sodium_mg": meal["total_sodium_mg"],
+        "bite_count": meal["bite_count"],
+        "average_pace_seconds": pace,
+        "matrix_id": meal.get("food_matrix_id", "default")
+    }
+    
+    response = chat_with_echo(req.message, stats)
+    return {"reply": response}
+
+class PersonaRequest(BaseModel):
+    condition: str
+    sodium_limit_mg: int
+
+@app.post("/api/ai/persona")
+def update_persona(req: PersonaRequest) -> dict:
+    from .minerals import set_persona
+    set_persona(req.condition, req.sodium_limit_mg)
+    return {"status": "ok", "condition": req.condition, "limit": req.sodium_limit_mg}
 
 # --- Manual entries ----------------------------------------------------------
 class ManualMeal(BaseModel):

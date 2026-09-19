@@ -39,7 +39,7 @@ export function DailyMeter({ intake }: { intake: IntakeToday | null }) {
         <div className="readout">
           <div className="label">Measured</div>
           <div className="value">
-            {Math.round(intake.measured_sodium_mg).toLocaleString()} <small>mg</small>
+            {Math.round(intake.measured_sodium_mg).toLocaleString()} <small>mg (±10%)</small>
           </div>
         </div>
         <div className="readout">

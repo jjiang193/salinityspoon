@@ -51,17 +51,17 @@ def g_per_litre_to_salt_percent(g_l: float) -> float:
     return g_l / 10.0  # 10 g/L == 1% w/v
 
 
-def sodium_mg(g_per_litre: float, volume_ml: float) -> float:
-    return g_per_litre * SODIUM_FRACTION_OF_NACL * volume_ml
+def sodium_mg(g_per_litre: float, volume_ml: float, food_matrix_factor: float = 1.0) -> float:
+    return g_per_litre * SODIUM_FRACTION_OF_NACL * volume_ml * food_matrix_factor
 
 
 def sodium_range_mg(
-    g_per_litre: float, volume_ml: float, volume_sd_ml: float
+    g_per_litre: float, volume_ml: float, volume_sd_ml: float, food_matrix_factor: float = 1.0
 ) -> tuple[float, float, float]:
     """Point estimate plus bounds from the scoop volume's spread."""
-    mid = sodium_mg(g_per_litre, volume_ml)
-    low = sodium_mg(g_per_litre, max(0.0, volume_ml - volume_sd_ml))
-    high = sodium_mg(g_per_litre, volume_ml + volume_sd_ml)
+    mid = sodium_mg(g_per_litre, volume_ml, food_matrix_factor)
+    low = sodium_mg(g_per_litre, max(0.0, volume_ml - volume_sd_ml), food_matrix_factor)
+    high = sodium_mg(g_per_litre, volume_ml + volume_sd_ml, food_matrix_factor)
     return low, mid, high
 
 

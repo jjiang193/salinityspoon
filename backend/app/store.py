@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS meals (
     total_sodium_mg_high REAL NOT NULL DEFAULT 0,
     total_volume_ml     REAL NOT NULL DEFAULT 0,
     product_name   TEXT,
-    label_claim    TEXT NOT NULL DEFAULT 'none'
+    label_claim    TEXT NOT NULL DEFAULT 'none',
+    food_matrix_id TEXT NOT NULL DEFAULT 'default'
 );
 
 CREATE TABLE IF NOT EXISTS bites (
@@ -145,7 +146,13 @@ def recompute_meal(meal_id: int) -> dict[str, Any]:
     Cheap at this scale, and it means a replayed or corrected bite cannot leave
     a total permanently wrong.
     """
+    from .minerals import get_matrix
     with connect() as conn:
+        meal_row = conn.execute("SELECT food_matrix_id FROM meals WHERE id = ?", (meal_id,)).fetchone()
+        matrix_id = meal_row["food_matrix_id"] if meal_row else "default"
+        matrix = get_matrix(matrix_id)
+        factor = matrix.correction_factor if matrix else 1.0
+
         rows = conn.execute(
             "SELECT payload FROM bites WHERE meal_id = ?", (meal_id,)
         ).fetchall()
@@ -153,9 +160,9 @@ def recompute_meal(meal_id: int) -> dict[str, Any]:
 
         totals = {
             "bite_count": len(bites),
-            "total_sodium_mg": sum(b["sodium_mg"] for b in bites),
-            "total_sodium_mg_low": sum(b["sodium_mg_low"] for b in bites),
-            "total_sodium_mg_high": sum(b["sodium_mg_high"] for b in bites),
+            "total_sodium_mg": sum(b["sodium_mg"] * factor for b in bites),
+            "total_sodium_mg_low": sum(b["sodium_mg_low"] * factor for b in bites),
+            "total_sodium_mg_high": sum(b["sodium_mg_high"] * factor for b in bites),
             "total_volume_ml": sum(b["volume_ml"] for b in bites),
         }
         conn.execute(
@@ -260,6 +267,13 @@ def set_meal_label(meal_id: int, product_name: Optional[str], label_claim: str) 
         conn.execute(
             "UPDATE meals SET product_name = ?, label_claim = ? WHERE id = ?",
             (product_name, label_claim, meal_id),
+        )
+
+def set_meal_matrix(meal_id: int, matrix_id: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE meals SET food_matrix_id = ? WHERE id = ?",
+            (matrix_id, meal_id),
         )
 
 

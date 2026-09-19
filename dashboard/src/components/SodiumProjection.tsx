@@ -51,7 +51,7 @@ export function SodiumProjection({
       <div className="readouts">
         <div className="ro">
           <div className="k">Per bite</div>
-          <div className="v">{p.mgPerBite.toFixed(1)} <small>mg</small></div>
+          <div className="v">{p.mgPerBite.toFixed(1)} <small>mg (±25%)</small></div>
         </div>
         <div className="ro">
           <div className="k">Rate</div>

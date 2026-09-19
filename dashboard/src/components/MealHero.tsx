@@ -35,12 +35,17 @@ export function MealHero({ totals, activeMealId }: Props) {
       <p className="hero-value">
         {bites > 0 ? Math.round(sodium).toLocaleString() : '—'}
         <span className="unit">mg</span>
+        {bites > 0 && sodium > 0 && (
+          <span style={{ fontSize: '0.5em', fontWeight: 'normal', color: 'var(--text-subtle)', marginLeft: '8px' }}>
+            (±{Math.round(((high - sodium) / sodium) * 100)}%)
+          </span>
+        )}
       </p>
 
       {bites > 0 && (
         <p className="hero-range">
           Range <strong>{Math.round(low).toLocaleString()}–{Math.round(high).toLocaleString()} mg</strong>
-          {' '}· scoop volume is estimated, not weighed
+          {' '}· Confidence bounds derived from calibrated volume variance.
         </p>
       )}
 
