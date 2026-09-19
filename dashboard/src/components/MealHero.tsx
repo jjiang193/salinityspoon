@@ -1,5 +1,7 @@
 import { MealTotals } from '../types';
-import { FDA_DAILY_LIMIT_MG, verdictFor, VERDICT_STATUS } from '../lib/sodium';
+import { FDA_DAILY_LIMIT_MG } from '../lib/sodium';
+import * as sev from '../lib/severity';
+import { Chip, Fact } from './Chip';
 
 interface Props {
   totals: MealTotals | null;
@@ -20,14 +22,12 @@ export function MealHero({ totals, activeMealId }: Props) {
   const high = totals?.total_sodium_mg_high ?? 0;
   const bites = totals?.bite_count ?? 0;
 
-  const verdict = verdictFor(sodium);
-  const status = VERDICT_STATUS[verdict];
   const pctOfLimit = (sodium / FDA_DAILY_LIMIT_MG) * 100;
 
   return (
     <section className="card">
       <h2>Sodium this meal</h2>
-      <p className="caption">
+      <p className="cap">
         {live ? `Meal #${activeMealId} in progress` : 'No meal in progress'}
         {bites > 0 && ` · ${bites} bite${bites === 1 ? '' : 's'}`}
       </p>
@@ -45,11 +45,8 @@ export function MealHero({ totals, activeMealId }: Props) {
       )}
 
       <div className="pill-row" style={{ marginTop: 14 }}>
-        <span className="pill" data-status={status.role}>
-          <span className="dot">{status.icon}</span>
-          {verdict} sodium
-        </span>
-        <span className="pill">{pctOfLimit.toFixed(0)}% of the 2,300 mg daily limit</span>
+        <Chip indicator={sev.mealVerdict(pctOfLimit)} />
+        <Fact>{pctOfLimit.toFixed(0)}% of the 2,300 mg daily limit</Fact>
       </div>
 
       <p className="hero-sub">

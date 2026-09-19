@@ -66,6 +66,7 @@ export function useTelemetry(): TelemetryState {
 
   const buffer = useRef<ChartPoint[]>([]);
   const pendingLatest = useRef<Sample | null>(null);
+  const seeded = useRef(false);
   const pendingSubmerged = useRef<{ temp: number | null; inRange: boolean } | null>(null);
 
   async function refreshHistory() {
@@ -76,6 +77,38 @@ export function useTelemetry(): TelemetryState {
       ]);
       setMeals(m);
       setIntake(i);
+
+      // Opening the dashboard mid-meal should not show an empty chart beside a
+      // large total. Backfill the open meal's bites once, from the server.
+      if (!seeded.current) {
+        seeded.current = true;
+        const open = (m as Meal[]).find((meal) => meal.ended_at === null);
+        if (open) {
+          try {
+            const detail = await fetch(`/api/meals/${open.id}`).then((r) => r.json());
+            const past: Bite[] = (detail.bites ?? []).slice(-MAX_RECENT_BITES).reverse();
+            if (past.length) {
+              setActiveMealId(open.id);
+              setMealTotals({
+                bite_count: open.bite_count,
+                total_sodium_mg: open.total_sodium_mg,
+                total_sodium_mg_low: open.total_sodium_mg_low,
+                total_sodium_mg_high: open.total_sodium_mg_high,
+                total_volume_ml: open.total_volume_ml,
+              });
+              // Live bites may already have arrived; keep them ahead of history.
+              setBites((live) => {
+                const seen = new Set(live.map((b) => `${b.device_id}-${b.bite_id}-${b.ts_utc}`));
+                return [...live, ...past.filter(
+                  (b) => !seen.has(`${b.device_id}-${b.bite_id}-${b.ts_utc}`),
+                )].slice(0, MAX_RECENT_BITES);
+              });
+            }
+          } catch {
+            /* the chart simply starts from live bites instead */
+          }
+        }
+      }
     } catch {
       // A dead backend already shows as a disconnected socket; no need to
       // shout about it twice.

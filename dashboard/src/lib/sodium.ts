@@ -7,23 +7,8 @@ export const AHA_IDEAL_LIMIT_MG = 1500;
 /** ±5% of FULL SCALE on a 0–20 mS/cm range, so ±1 mS/cm absolute. */
 export const PROBE_EC_FULL_SCALE_ERROR = 1.0;
 
-export type Verdict = 'low' | 'moderate' | 'high' | 'very high';
-
-export function verdictFor(sodiumMg: number): Verdict {
-  const pct = (sodiumMg / FDA_DAILY_LIMIT_MG) * 100;
-  if (pct < 25) return 'low';
-  if (pct < 50) return 'moderate';
-  if (pct < 85) return 'high';
-  return 'very high';
-}
-
-/** Status role, not a series color. Always shipped with an icon and a label. */
-export const VERDICT_STATUS: Record<Verdict, { role: string; icon: string }> = {
-  low: { role: 'good', icon: '●' },
-  moderate: { role: 'good', icon: '●' },
-  high: { role: 'warning', icon: '▲' },
-  'very high': { role: 'critical', icon: '■' },
-};
+// Status decisions live in ./severity.ts — one place, so colour cannot be spent
+// ad hoc at each call site. This module stays pure arithmetic.
 
 /**
  * Relative error from the sensor's fixed full-scale spec — it grows as the

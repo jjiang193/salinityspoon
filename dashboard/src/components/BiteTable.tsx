@@ -1,29 +1,30 @@
 import { Bite } from '../types';
 import { shortTime } from '../lib/time';
-
-const PACE_STATUS: Record<string, { role: string; icon: string }> = {
-  green: { role: 'good', icon: '●' },
-  yellow: { role: 'warning', icon: '▲' },
-  red: { role: 'critical', icon: '■' },
-  unknown: { role: '', icon: '◆' },
-};
+import * as sev from '../lib/severity';
+import { Chip } from './Chip';
 
 /**
  * Per-bite detail. Also the accessibility fallback for the charts above:
  * every measurement is readable as text, not only as colour and position.
  */
+/** Rows shown. The card is "recent bites", not every bite - the chart above
+ *  carries the full meal. */
+const VISIBLE = 8;
+
 export function BiteTable({ bites }: { bites: Bite[] }) {
+  const shown = bites.slice(0, VISIBLE);
   return (
     <section className="card">
       <h2>Recent bites</h2>
-      <p className="caption">
+      <p className="cap">
         Each row is one scoop, scored on the median of its captured EC samples
+        {bites.length > VISIBLE && ` · showing the latest ${VISIBLE} of ${bites.length}`}
       </p>
 
       {bites.length === 0 ? (
         <p className="empty">No bites yet.</p>
       ) : (
-        <table>
+        <div className="scroller"><table>
           <thead>
             <tr>
               <th>Time</th>
@@ -37,17 +38,11 @@ export function BiteTable({ bites }: { bites: Bite[] }) {
             </tr>
           </thead>
           <tbody>
-            {bites.map((b) => {
-              const pace = PACE_STATUS[b.pace] ?? PACE_STATUS.unknown;
+            {shown.map((b) => {
               return (
                 <tr key={`${b.device_id}-${b.bite_id}-${b.ts_utc}`}>
                   <td className="primary">{shortTime(b.ts_utc)}</td>
-                  <td>
-                    <span className="pill" data-status={pace.role}>
-                      <span className="dot">{pace.icon}</span>
-                      {b.pace}
-                    </span>
-                  </td>
+                  <td><Chip indicator={sev.pace(b.pace)} /></td>
                   <td className="num">{(b.salinity_g_l / 10).toFixed(2)}%</td>
                   <td className="num">{b.temp_c.toFixed(0)}°C</td>
                   <td className="num">{b.volume_ml.toFixed(1)} mL</td>
@@ -60,7 +55,7 @@ export function BiteTable({ bites }: { bites: Bite[] }) {
               );
             })}
           </tbody>
-        </table>
+        </table></div>
       )}
     </section>
   );

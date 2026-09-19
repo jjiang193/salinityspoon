@@ -41,7 +41,7 @@ export function SalinityChart({ points }: { points: ChartPoint[] }) {
   return (
     <section className="card">
       <h2>Live salinity</h2>
-      <p className="caption">
+      <p className="cap">
         Rolling 2-minute window · solid where the reading counts · faint while
         wetting · blank in air
       </p>

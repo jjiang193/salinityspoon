@@ -1,5 +1,7 @@
 import { PROBE_TEMP_MAX_C, QUALITY_THRESHOLD, Sample } from '../types';
 import { ecRelativeError } from '../lib/sodium';
+import * as sev from '../lib/severity';
+import { Chip } from './Chip';
 
 interface Props {
   connected: boolean;
@@ -15,18 +17,15 @@ const STATE_LABEL: Record<string, string> = {
 };
 
 /**
- * Makes the sensor fusion legible. The point to take away: the MPU-6050 is not
- * decoration, it is the gate deciding which EC readings count — and the
- * DS18B20 is the interlock deciding whether any reading is valid at all.
+ * Instrument panel. Most of what it reports is ambient - the probe is in air
+ * between bites, samples are correctly excluded - so most of it is uncoloured.
+ * See src/lib/severity.ts for why.
  */
 export function SensorStatus({
   connected, latest, lastError, lastSubmergedTempC, lastSubmergedInRange,
 }: Props) {
   const quality = latest?.quality ?? 0;
-  // The probe's rating is about the LIQUID. Reporting air temperature here
-  // would show a reassuring green pill while the soup is still boiling.
-  const tempOk = lastSubmergedInRange !== false;
-  const counts = (latest?.submerged ?? false)
+  const counting = (latest?.submerged ?? false)
     && (latest?.temp_in_range ?? false)
     && quality >= QUALITY_THRESHOLD;
   const ec = latest?.ec25_ms_cm ?? 0;
@@ -34,53 +33,24 @@ export function SensorStatus({
 
   return (
     <section className="card">
-      <h2>Sensor state</h2>
-      <p className="caption">
+      <h2>Sensor</h2>
+      <p className="cap">
         Detector: {STATE_LABEL[latest?.state ?? 'IDLE'] ?? latest?.state}
+        {' · '}probe rated 0–{PROBE_TEMP_MAX_C} °C
       </p>
 
       <div className="pill-row">
-        <span className="pill" data-status={connected ? 'good' : 'critical'}>
-          <span className="dot">{connected ? '●' : '■'}</span>
-          {connected ? 'Spoon connected' : 'Disconnected'}
-        </span>
-        <span className="pill" data-status={
-          lastSubmergedInRange === null ? '' : tempOk ? 'good' : 'critical'
-        }>
-          <span className="dot">
-            {lastSubmergedInRange === null ? '◆' : tempOk ? '●' : '■'}
-          </span>
-          {lastSubmergedInRange === null ? 'Liquid not yet measured'
-            : tempOk ? `Liquid in range (≤ ${PROBE_TEMP_MAX_C} °C)`
-                     : 'Liquid too hot'}
-        </span>
-        <span className="pill" data-status={latest?.submerged ? 'good' : 'warning'}>
-          <span className="dot">{latest?.submerged ? '●' : '▲'}</span>
-          {latest?.submerged ? 'Submerged' : 'In air'}
-        </span>
-        <span className="pill" data-status={counts ? 'good' : 'warning'}>
-          <span className="dot">{counts ? '●' : '▲'}</span>
-          {counts ? 'Reading counts' : 'Reading excluded'}
-        </span>
+        <Chip indicator={sev.connection(connected)} />
+        <Chip indicator={sev.probeRange(lastSubmergedInRange)} />
+        <Chip indicator={sev.submersion(latest?.submerged ?? false)} />
+        <Chip indicator={sev.capture(counting)} />
       </div>
 
-      {lastError && (
-        <p className="hero-sub" style={{ marginTop: 14 }}>
-          Last refusal: {lastError}
-        </p>
-      )}
+      {lastError && <p className="note">Last refusal: {lastError}</p>}
 
-      <div style={{ marginTop: 18 }}>
-        <div className="readout">
-          <div className="label">Reading quality</div>
-          <div className="value">{(quality * 100).toFixed(0)}<small>%</small></div>
-        </div>
-        <div className="quality-track">
-          <div className="quality-fill" style={{ width: `${Math.round(quality * 100)}%` }} />
-        </div>
-      </div>
+      <div className="rule" />
 
-      <div className="readouts" style={{ marginTop: 20 }}>
+      <div className="readouts" style={{ marginTop: 0 }}>
         <div className="readout">
           <div className="label">EC @ 25 °C</div>
           <div className="value">{latest ? ec.toFixed(2) : '—'} <small>mS/cm</small></div>
@@ -102,6 +72,15 @@ export function SensorStatus({
           <div className="value">
             {relErr !== null ? `±${(relErr * 100).toFixed(0)}` : '—'} <small>%</small>
           </div>
+        </div>
+      </div>
+
+      <div style={{ marginTop: 14 }}>
+        <div className="readout">
+          <div className="label">Reading quality · {(quality * 100).toFixed(0)}%</div>
+        </div>
+        <div className="quality-track">
+          <div className="quality-fill" style={{ width: `${Math.round(quality * 100)}%` }} />
         </div>
       </div>
     </section>

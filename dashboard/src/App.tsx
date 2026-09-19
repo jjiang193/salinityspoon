@@ -5,8 +5,12 @@ import { SalinityChart } from './components/SalinityChart';
 import { TemperatureChart } from './components/TemperatureChart';
 import { DailyMeter } from './components/DailyMeter';
 import { BiteTable } from './components/BiteTable';
+import { BiteChart } from './components/BiteChart';
+import { SodiumProjection } from './components/SodiumProjection';
 import { LabelCheckCard } from './components/LabelCheckCard';
 import { ManualMealForm } from './components/ManualMealForm';
+import { Chip } from './components/Chip';
+import * as sev from './lib/severity';
 import { PROBE_TEMP_MAX_C } from './types';
 
 export default function App() {
@@ -27,10 +31,7 @@ export default function App() {
           <h1>Salinity Spoon</h1>
           <p className="sub">Salt in liquids, 0–{PROBE_TEMP_MAX_C} °C → sodium you can act on</p>
         </div>
-        <span className="pill" data-status={connected ? 'good' : 'critical'}>
-          <span className="dot">{connected ? '●' : '■'}</span>
-          {connected ? 'Live' : 'Offline'}
-        </span>
+        <Chip indicator={sev.connection(connected)} />
       </header>
 
       {outOfRange && (
@@ -61,14 +62,22 @@ export default function App() {
       </div>
 
       <div className="grid two" style={{ marginTop: 16 }}>
-        <SalinityChart points={points} />
-        <TemperatureChart points={points} />
+        <BiteChart bites={bites} />
+        <SodiumProjection bites={bites} intake={intake} />
       </div>
 
       <div className="grid two" style={{ marginTop: 16 }}>
         <LabelCheckCard check={labelCheck} activeMealId={activeMealId} />
         <DailyMeter intake={intake} />
       </div>
+
+      <details className="card diag" style={{ marginTop: 16 }}>
+        <summary>Signal diagnostics — sample-level traces</summary>
+        <div className="grid two">
+          <SalinityChart points={points} />
+          <TemperatureChart points={points} />
+        </div>
+      </details>
 
       <div className="grid two" style={{ marginTop: 16 }}>
         <ManualMealForm onChange={refresh} />

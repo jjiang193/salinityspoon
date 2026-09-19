@@ -58,7 +58,7 @@ export function ManualMealForm({ onChange }: { onChange: () => void }) {
   return (
     <section className="card">
       <h2>Log solid food</h2>
-      <p className="caption">
+      <p className="cap">
         Self-reported · the probe reads liquids only, so solids are entered by hand
       </p>
 

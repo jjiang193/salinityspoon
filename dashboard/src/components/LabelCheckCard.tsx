@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { LabelCheck, LabelClaimOption } from '../types';
+import * as sev from '../lib/severity';
+import { Chip, Fact } from './Chip';
 
 interface Props {
   check: LabelCheck | null;
@@ -68,16 +70,12 @@ export function LabelCheckCard({ check, activeMealId }: Props) {
     }
   }
 
-  const role =
-    check?.severity === 'warning' ? 'critical'
-    : check?.severity === 'info' ? 'warning'
-    : 'good';
-  const icon = role === 'critical' ? '■' : role === 'warning' ? '▲' : '●';
+  const tier = sev.labelSeverity(check?.severity ?? 'none');
 
   return (
     <section className="card">
       <h2>Label check</h2>
-      <p className="caption">
+      <p className="cap">
         {check?.product_name
           ? <>Checking <strong style={{ color: 'var(--text-primary)' }}>{check.product_name}</strong> against its label</>
           : 'Declare what is being measured, and every bite is checked against its claim'}
@@ -111,15 +109,16 @@ export function LabelCheckCard({ check, activeMealId }: Props) {
       {check && check.claim !== 'none' ? (
         <div style={{ marginTop: 18 }}>
           <div className="pill-row">
-            <span className="pill" data-status={role}>
-              <span className="dot">{icon}</span>
-              {check.headline}
-            </span>
+            <Chip indicator={{
+              tier,
+              label: check.headline,
+              role: tier === 'attention' ? 'critical' : undefined,
+            }} />
             {check.claim_max_mg !== null && (
-              <span className="pill">
+              <Fact>
                 {check.measured_mg_per_serving.toFixed(0)} mg measured vs{' '}
                 {check.claim_max_mg.toFixed(0)} mg claimed
-              </span>
+              </Fact>
             )}
           </div>
           <p className="hero-sub">{check.detail}</p>

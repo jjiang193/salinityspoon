@@ -1,4 +1,6 @@
 import { IntakeToday } from '../types';
+import * as sev from '../lib/severity';
+import { Chip } from './Chip';
 
 /**
  * A meter, not a chart: one value against one threshold. The AHA's stricter
@@ -17,16 +19,18 @@ export function DailyMeter({ intake }: { intake: IntakeToday | null }) {
   const pct = Math.min(intake.pct_of_fda_limit, 100);
   const idealMarkerPct = (intake.aha_ideal_limit_mg / intake.fda_daily_limit_mg) * 100;
 
-  const role =
+  const load = sev.dailyLoad(intake.pct_of_fda_limit);
+  // The bar itself still carries colour at every level - it is the one place a
+  // continuous magnitude is encoded, so a neutral bar would lose information.
+  const barRole =
     intake.pct_of_fda_limit >= 100 ? 'critical'
-    : intake.pct_of_fda_limit >= 75 ? 'warning'
+    : intake.pct_of_fda_limit >= 80 ? 'warning'
     : 'good';
-  const icon = role === 'critical' ? '■' : role === 'warning' ? '▲' : '●';
 
   return (
     <section className="card">
       <h2>Today's sodium</h2>
-      <p className="caption">
+      <p className="cap">
         {intake.bite_count} measured bite{intake.bite_count === 1 ? '' : 's'} ·{' '}
         {intake.manual_count} self-reported item{intake.manual_count === 1 ? '' : 's'}
       </p>
@@ -61,7 +65,7 @@ export function DailyMeter({ intake }: { intake: IntakeToday | null }) {
 
       <div className="meter">
         <div className="meter-track">
-          <div className="meter-fill" style={{ width: `${pct}%`, background: `var(--status-${role})` }} />
+          <div className="meter-fill" style={{ width: `${pct}%`, background: `var(--status-${barRole})` }} />
           <div className="meter-marker" style={{ left: `${idealMarkerPct}%` }}
                title={`AHA ideal limit: ${intake.aha_ideal_limit_mg} mg`} />
         </div>
@@ -73,10 +77,7 @@ export function DailyMeter({ intake }: { intake: IntakeToday | null }) {
       </div>
 
       <div className="pill-row" style={{ marginTop: 14 }}>
-        <span className="pill" data-status={role}>
-          <span className="dot">{icon}</span>
-          {intake.pct_of_fda_limit.toFixed(0)}% of daily limit
-        </span>
+        <Chip indicator={load} />
       </div>
     </section>
   );

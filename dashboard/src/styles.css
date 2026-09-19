@@ -24,6 +24,9 @@
 
   --band-fill: rgba(42, 120, 214, 0.08);
   --limit-line: #d03b3b;
+
+  --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  --sans: system-ui, -apple-system, 'Segoe UI', sans-serif;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -66,7 +69,7 @@ body {
   margin: 0;
   background: var(--plane);
   color: var(--text-primary);
-  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-family: var(--sans);
   -webkit-font-smoothing: antialiased;
 }
 
@@ -82,14 +85,19 @@ header.masthead {
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 18px 20px;
+  border-radius: 8px;
+  padding: 16px 18px;
 }
 .card h2 {
-  font-size: 13px; font-weight: 600; margin: 0 0 2px;
-  color: var(--text-primary); letter-spacing: 0.01em;
+  font-size: 13px; font-weight: 600; margin: 0 0 3px;
+  color: var(--text-primary); letter-spacing: 0.005em;
 }
-.card .caption { font-size: 12px; color: var(--text-secondary); margin: 0 0 16px; }
+.card .cap {
+  font-size: 12px; color: var(--text-secondary); margin: 0 0 15px; line-height: 1.45;
+}
+
+/* Hairline divider inside a card - an instrument panel is ruled, not padded. */
+.rule { height: 1px; background: var(--border); margin: 16px 0 14px; }
 
 .grid { display: grid; gap: 16px; }
 .grid.two { grid-template-columns: 1fr 1fr; }
@@ -101,12 +109,29 @@ header.masthead {
 
 /* --- Hero figure --- */
 .hero-value {
-  font-size: 56px; font-weight: 600; line-height: 1;
-  letter-spacing: -0.03em; margin: 4px 0 0;
+  font-family: var(--mono);
+  font-size: 50px; font-weight: 600; line-height: 1;
+  letter-spacing: -0.04em; margin: 4px 0 0;
+  font-variant-numeric: tabular-nums;
 }
 .hero-value .unit {
-  font-size: 20px; font-weight: 500; color: var(--text-secondary);
-  margin-left: 6px; letter-spacing: 0;
+  font-family: var(--sans);
+  font-size: 18px; font-weight: 500; color: var(--text-secondary);
+  margin-left: 7px; letter-spacing: 0;
+}
+
+/* Secondary figure, for the projection panel. */
+.fig-sm {
+  font-family: var(--mono);
+  font-size: 34px; font-weight: 600; line-height: 1.05;
+  letter-spacing: -0.03em; margin: 2px 0 0;
+  font-variant-numeric: tabular-nums;
+}
+.fig-sm span {
+  display: block;
+  font-family: var(--sans);
+  font-size: 12.5px; font-weight: 500; letter-spacing: 0;
+  color: var(--text-secondary); margin-top: 5px;
 }
 .hero-sub { color: var(--text-secondary); font-size: 13px; margin: 10px 0 0; }
 .hero-dim { opacity: 0.35; }
@@ -114,17 +139,35 @@ header.masthead {
 /* --- Status pills: icon + label, never color alone --- */
 .pill {
   display: inline-flex; align-items: center; gap: 6px;
-  font-size: 12px; font-weight: 500; padding: 4px 10px;
-  border-radius: 999px; border: 1px solid var(--border);
+  font-size: 11.5px; font-weight: 500; padding: 3px 9px;
+  border-radius: 4px; border: 1px solid var(--border);
   color: var(--text-primary); background: var(--plane);
 }
-.pill .dot { font-size: 10px; line-height: 1; }
-.pill[data-status='good']     .dot { color: var(--status-good); }
-.pill[data-status='warning']  .dot { color: var(--status-warning); }
-.pill[data-status='serious']  .dot { color: var(--status-serious); }
-.pill[data-status='critical'] .dot { color: var(--status-critical); }
+.pill .dot { font-size: 9px; line-height: 1; color: var(--text-muted); }
 
-.pill-row { display: flex; flex-wrap: wrap; gap: 8px; }
+/* Tier decides whether a chip gets colour at all. See src/lib/severity.ts:
+   ambient state is the common case and stays neutral, so the states that do
+   carry colour actually read as urgent. */
+.pill[data-tier='ambient'] {
+  color: var(--text-secondary); background: transparent;
+}
+.pill[data-tier='ambient'] .dot { color: var(--text-muted); }
+.pill[data-tier='advisory'] .dot { color: var(--text-secondary); }
+.pill[data-tier='attention'] { border-color: var(--border-strong, var(--border)); }
+.pill[data-tier='attention'][data-status='good']     .dot { color: var(--status-good); }
+.pill[data-tier='attention'][data-status='warning']  .dot { color: var(--status-warning); }
+.pill[data-tier='attention'][data-status='critical'] .dot { color: var(--status-critical); }
+
+/* Legacy call sites that still pass data-status without a tier. */
+.pill[data-status='good']:not([data-tier])     .dot { color: var(--status-good); }
+.pill[data-status='warning']:not([data-tier])  .dot { color: var(--status-warning); }
+.pill[data-status='critical']:not([data-tier]) .dot { color: var(--status-critical); }
+
+.mk { color: var(--status-warning); margin-right: 6px; font-size: 10px; }
+.note.attention { color: var(--text-primary); }
+
+.pill-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.note { font-size: 12.5px; color: var(--text-secondary); margin: 11px 0 0; line-height: 1.5; }
 
 /* --- Meter --- */
 .meter { margin-top: 14px; }
@@ -139,7 +182,8 @@ header.masthead {
 }
 .meter-legend {
   display: flex; justify-content: space-between;
-  font-size: 11px; color: var(--text-muted); margin-top: 6px;
+  font-family: var(--mono);
+  font-size: 10px; color: var(--text-muted); margin-top: 6px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -156,20 +200,25 @@ header.masthead {
   gap: 14px 20px; margin-top: 4px;
 }
 .readout .label {
-  font-size: 11px; color: var(--text-muted); text-transform: uppercase;
-  letter-spacing: 0.04em; margin-bottom: 3px;
+  font-family: var(--mono);
+  font-size: 10px; color: var(--text-muted); text-transform: uppercase;
+  letter-spacing: 0.07em; margin-bottom: 4px;
 }
 .readout .value {
-  font-size: 19px; font-weight: 600; font-variant-numeric: tabular-nums;
+  font-family: var(--mono);
+  font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums;
 }
 .readout .value small { font-size: 12px; color: var(--text-secondary); font-weight: 500; }
 
 /* --- Table --- */
-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.scroller { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 th {
-  text-align: left; font-size: 11px; font-weight: 600; color: var(--text-muted);
-  text-transform: uppercase; letter-spacing: 0.04em;
-  padding: 0 10px 8px 0; border-bottom: 1px solid var(--border);
+  text-align: left; font-family: var(--mono);
+  font-size: 10px; font-weight: 600; color: var(--text-muted);
+  text-transform: uppercase; letter-spacing: 0.06em;
+  padding: 0 10px 7px 0; border-bottom: 1px solid var(--border);
+  white-space: nowrap;
 }
 td {
   padding: 10px 10px 10px 0; border-bottom: 1px solid var(--border);
@@ -232,3 +281,17 @@ th.num, td.num { text-align: right; padding-right: 0; }
 }
 .btn-link:hover { color: var(--status-critical); }
 .form-note { font-size: 12px; color: var(--text-secondary); margin: 10px 0 0; }
+
+
+/* --- Diagnostics panel: the sample-level signal, demoted from top billing --- */
+.diag summary {
+  cursor: pointer; list-style: none;
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.07em;
+  text-transform: uppercase; color: var(--text-muted);
+  padding: 2px 0;
+}
+.diag summary::-webkit-details-marker { display: none; }
+.diag summary::before { content: '▸ '; }
+.diag[open] summary::before { content: '▾ '; }
+.diag summary:focus-visible { outline: 2px solid var(--series-salinity); outline-offset: 3px; }
+.diag > div { margin-top: 14px; }

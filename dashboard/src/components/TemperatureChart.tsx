@@ -37,7 +37,7 @@ export function TemperatureChart({ points }: { points: ChartPoint[] }) {
   return (
     <section className="card">
       <h2>Liquid temperature</h2>
-      <p className="caption">
+      <p className="cap">
         Drives EC compensation · above {PROBE_TEMP_MAX_C} °C the probe is out of
         spec and bites are refused
       </p>
