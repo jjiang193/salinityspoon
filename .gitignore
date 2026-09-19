@@ -1,0 +1,18 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+backend/spoon.db
+
+# Node
+node_modules/
+dashboard/dist/
+*.tsbuildinfo
+
+# Firmware secrets - never commit
+firmware/spoon/secrets.h
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store

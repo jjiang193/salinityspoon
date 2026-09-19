@@ -1,0 +1,63 @@
+import { MealTotals } from '../types';
+import { FDA_DAILY_LIMIT_MG, verdictFor, VERDICT_STATUS } from '../lib/sodium';
+
+interface Props {
+  totals: MealTotals | null;
+  activeMealId: number | null;
+}
+
+/**
+ * The headline. A single number with a comparison beats any chart — "how much
+ * salt is in this meal" has one value, not a shape.
+ *
+ * The range is shown, always. Scoop volume is estimated, not weighed, and a
+ * point estimate with no error bar would overclaim what this hardware can do.
+ */
+export function MealHero({ totals, activeMealId }: Props) {
+  const live = activeMealId !== null;
+  const sodium = totals?.total_sodium_mg ?? 0;
+  const low = totals?.total_sodium_mg_low ?? 0;
+  const high = totals?.total_sodium_mg_high ?? 0;
+  const bites = totals?.bite_count ?? 0;
+
+  const verdict = verdictFor(sodium);
+  const status = VERDICT_STATUS[verdict];
+  const pctOfLimit = (sodium / FDA_DAILY_LIMIT_MG) * 100;
+
+  return (
+    <section className="card">
+      <h2>Sodium this meal</h2>
+      <p className="caption">
+        {live ? `Meal #${activeMealId} in progress` : 'No meal in progress'}
+        {bites > 0 && ` · ${bites} bite${bites === 1 ? '' : 's'}`}
+      </p>
+
+      <p className="hero-value">
+        {bites > 0 ? Math.round(sodium).toLocaleString() : '—'}
+        <span className="unit">mg</span>
+      </p>
+
+      {bites > 0 && (
+        <p className="hero-range">
+          Range <strong>{Math.round(low).toLocaleString()}–{Math.round(high).toLocaleString()} mg</strong>
+          {' '}· scoop volume is estimated, not weighed
+        </p>
+      )}
+
+      <div className="pill-row" style={{ marginTop: 14 }}>
+        <span className="pill" data-status={status.role}>
+          <span className="dot">{status.icon}</span>
+          {verdict} sodium
+        </span>
+        <span className="pill">{pctOfLimit.toFixed(0)}% of the 2,300 mg daily limit</span>
+      </div>
+
+      <p className="hero-sub">
+        {bites > 0
+          ? <>Measured as <strong style={{ color: 'var(--text-primary)' }}>NaCl-equivalent salinity</strong>.
+              Conductivity reads all ions, not sodium alone.</>
+          : 'Dip the spoon to log a bite. The liquid must be between 0 and 40 °C.'}
+      </p>
+    </section>
+  );
+}
