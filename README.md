@@ -92,6 +92,41 @@ yields ~50 samples in that window — more evidence than a slow 2-second settle
 ever had, in a tenth of the time. See
 [`docs/bite-detection.md`](docs/bite-detection.md).
 
+### Conductivity can spot a potassium salt substitute
+
+The probe cannot tell sodium from potassium — it reads all ions. Normally a
+limitation. But salt substitutes *are* potassium chloride, so a product
+**labelled** low-sodium that **measures** high ionic content is probably
+substituting.
+
+That matters clinically: for people with kidney disease, or on ACE inhibitors,
+ARBs or potassium-sparing diuretics, excess potassium risks hyperkalemia. No food
+database or barcode app can detect it. A conductivity measurement can.
+
+Declare a label claim on the dashboard and every bite is checked against FDA
+per-serving limits. It flags; it never diagnoses.
+
+### Liquids only, and honest about it
+
+The probe reads liquids, so solids are entered by hand and shown as
+**self-reported**, never merged into the measured figure. In a representative
+day that is 1,040 mg self-reported against 870 mg measured — over half the total
+would be invisible if the gap were papered over.
+
+### Replay mode
+
+The backend records every ingested event, and `tools/replay.py` plays a session
+back through the identical pipeline with timestamps shifted to now. If the
+hardware dies before judging, the demo still runs. It is also how thresholds get
+tuned without standing over a bowl.
+
+```bash
+curl -X POST localhost:8000/api/recording/start -H 'Content-Type: application/json' -d '{"label":"broth"}'
+# ... take some bites ...
+curl -X POST localhost:8000/api/recording/stop
+python tools/replay.py backend/recordings/<file>.jsonl --loop
+```
+
 ### Volume is calibrated, not weighed
 
 There is no load cell. Scoop volume is calibrated per user, and the honest
@@ -110,7 +145,12 @@ than any single bite.
 | `backend/app/` | FastAPI — ingest, broadcast, meal segmentation, SQLite |
 | `dashboard/` | React + Vite + TypeScript |
 | `tools/mock_spoon.py` | Simulator running the same state machine |
+| `tools/replay.py` | Replays a recorded session through the live pipeline |
 | `docs/` | Contract, measurement protocol, bite detection, wiring, calibration |
+
+**Start here:** [`docs/engineering-notes.md`](docs/engineering-notes.md) — what was
+hard and how it was solved. [`docs/demo-script.md`](docs/demo-script.md) — the
+ninety-second walkthrough.
 
 ## Hardware
 
@@ -152,6 +192,9 @@ Skeleton complete and verified end to end against the simulator: a simulated
 0.62% liquid reads back as 0.62%, meal totals aggregate correctly, and the
 temperature interlock refuses bites at 55 °C and −5 °C on both the device and
 the server while accepting the 40 °C boundary.
+
+Label checking, manual entry and record/replay are built and verified against
+the simulator.
 
 Next: first light on real hardware. Bench each sensor individually per the
 checks in `docs/wiring.md`, then run all three calibrations.

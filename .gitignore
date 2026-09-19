@@ -16,3 +16,4 @@ firmware/spoon/secrets.h
 .vscode/
 .idea/
 .DS_Store
+backend/recordings/

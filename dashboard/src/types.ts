@@ -73,9 +73,42 @@ export interface Meal extends MealTotals {
   ended_at: string | null;
 }
 
+export interface LabelCheck {
+  product_name: string | null;
+  claim: string;
+  claim_label: string;
+  claim_max_mg: number | null;
+  measured_mg_per_serving: number;
+  ratio: number | null;
+  flagged: boolean;
+  severity: 'none' | 'info' | 'warning';
+  headline: string;
+  detail: string;
+}
+
+export interface LabelClaimOption {
+  value: string;
+  label: string;
+  max_sodium_mg_per_serving: number | null;
+}
+
+export interface ManualMeal {
+  id: number;
+  ts_utc: string;
+  name: string;
+  portion: string | null;
+  sodium_mg: number;
+  source: string;
+}
+
 export interface IntakeToday {
+  /** Measured by the spoon. */
+  measured_sodium_mg: number;
+  /** Self-reported solids the probe cannot read. Never conflated with measured. */
+  manual_sodium_mg: number;
   total_sodium_mg: number;
   bite_count: number;
+  manual_count: number;
   meal_count: number;
   fda_daily_limit_mg: number;
   aha_ideal_limit_mg: number;
@@ -86,7 +119,8 @@ export interface IntakeToday {
 
 export type LiveMessage =
   | { type: 'sample'; received_at: string; meal_id: number | null; data: Sample }
-  | { type: 'bite'; received_at: string; meal_id: number; data: Bite; meal_totals: MealTotals }
+  | { type: 'bite'; received_at: string; meal_id: number; data: Bite;
+      meal_totals: MealTotals; label_check?: LabelCheck }
   | { type: 'meal_started'; meal_id: number }
   | { type: 'meal_ended'; meal_id: number }
   | { type: 'error'; detail: string };

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  Bite, ChartPoint, IntakeToday, LiveMessage, Meal, MealTotals,
+  Bite, ChartPoint, IntakeToday, LabelCheck, LiveMessage, Meal, MealTotals,
   QUALITY_THRESHOLD, Sample,
 } from '../types';
 
@@ -26,6 +26,9 @@ export interface TelemetryState {
   lastSubmergedTempC: number | null;
   /** Whether that reading was inside the probe's range. Null until first dip. */
   lastSubmergedInRange: boolean | null;
+  labelCheck: LabelCheck | null;
+  /** Lets the manual-entry form pull fresh totals after it writes. */
+  refresh: () => void;
 }
 
 function toPoint(msg: Extract<LiveMessage, { type: 'sample' }>): ChartPoint {
@@ -59,6 +62,7 @@ export function useTelemetry(): TelemetryState {
   const [lastError, setLastError] = useState<string | null>(null);
   const [lastSubmergedTempC, setLastSubmergedTempC] = useState<number | null>(null);
   const [lastSubmergedInRange, setLastSubmergedInRange] = useState<boolean | null>(null);
+  const [labelCheck, setLabelCheck] = useState<LabelCheck | null>(null);
 
   const buffer = useRef<ChartPoint[]>([]);
   const pendingLatest = useRef<Sample | null>(null);
@@ -111,11 +115,13 @@ export function useTelemetry(): TelemetryState {
             setMealTotals(msg.meal_totals);
             setActiveMealId(msg.meal_id);
             setLastError(null);
+            if (msg.label_check) setLabelCheck(msg.label_check);
             refreshHistory();
             break;
           case 'meal_started':
             setActiveMealId(msg.meal_id);
             setMealTotals(null);
+            setLabelCheck(null);
             break;
           case 'meal_ended':
             setActiveMealId(null);
@@ -167,5 +173,6 @@ export function useTelemetry(): TelemetryState {
     connected, latest, points, bites, activeMealId,
     mealTotals, meals, intake, lastError,
     lastSubmergedTempC, lastSubmergedInRange,
+    labelCheck, refresh: refreshHistory,
   };
 }

@@ -38,7 +38,9 @@ CREATE TABLE IF NOT EXISTS meals (
     total_sodium_mg     REAL NOT NULL DEFAULT 0,
     total_sodium_mg_low REAL NOT NULL DEFAULT 0,
     total_sodium_mg_high REAL NOT NULL DEFAULT 0,
-    total_volume_ml     REAL NOT NULL DEFAULT 0
+    total_volume_ml     REAL NOT NULL DEFAULT 0,
+    product_name   TEXT,
+    label_claim    TEXT NOT NULL DEFAULT 'none'
 );
 
 CREATE TABLE IF NOT EXISTS bites (
@@ -54,6 +56,17 @@ CREATE TABLE IF NOT EXISTS bites (
     UNIQUE(device_id, ts_utc, bite_id)
 );
 
+CREATE TABLE IF NOT EXISTS manual_meals (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    patient_id  TEXT NOT NULL DEFAULT 'demo-1',
+    ts_utc      TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    portion     TEXT,
+    sodium_mg   REAL NOT NULL,
+    source      TEXT NOT NULL DEFAULT 'manual'
+);
+
+CREATE INDEX IF NOT EXISTS idx_manual_ts ON manual_meals(patient_id, ts_utc);
 CREATE INDEX IF NOT EXISTS idx_bites_meal ON bites(meal_id);
 CREATE INDEX IF NOT EXISTS idx_bites_ts   ON bites(patient_id, ts_utc);
 CREATE INDEX IF NOT EXISTS idx_meals_start ON meals(patient_id, started_at);
@@ -223,8 +236,77 @@ def intake_today(patient_id: str = "demo-1") -> dict[str, Any]:
                 WHERE patient_id = ? AND started_at >= ?""",
             (patient_id, midnight),
         ).fetchone()
+        manual = conn.execute(
+            """SELECT COALESCE(SUM(sodium_mg), 0) AS total, COUNT(*) AS n
+                 FROM manual_meals WHERE patient_id = ? AND ts_utc >= ?""",
+            (patient_id, midnight),
+        ).fetchone()
+
+        # Measured and self-reported are summed but never conflated - the
+        # dashboard labels which is which, because they are not the same claim.
         return {
-            "total_sodium_mg": row["total"],
+            "measured_sodium_mg": row["total"],
+            "manual_sodium_mg": manual["total"],
+            "total_sodium_mg": row["total"] + manual["total"],
             "bite_count": row["bites"],
+            "manual_count": manual["n"],
             "meal_count": meals["n"],
         }
+
+
+# --- Label claims ----------------------------------------------------------
+def set_meal_label(meal_id: int, product_name: Optional[str], label_claim: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE meals SET product_name = ?, label_claim = ? WHERE id = ?",
+            (product_name, label_claim, meal_id),
+        )
+
+
+def get_meal_label(meal_id: Optional[int]) -> tuple[Optional[str], str]:
+    if meal_id is None:
+        return None, "none"
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT product_name, label_claim FROM meals WHERE id = ?", (meal_id,)
+        ).fetchone()
+        if not row:
+            return None, "none"
+        return row["product_name"], row["label_claim"] or "none"
+
+
+# --- Manual entries --------------------------------------------------------
+def add_manual_meal(
+    name: str, sodium_mg: float, portion: Optional[str] = None,
+    ts_utc: Optional[str] = None, patient_id: str = "demo-1",
+) -> dict[str, Any]:
+    stamp = ts_utc or utcnow_iso()
+    with connect() as conn:
+        cur = conn.execute(
+            """INSERT INTO manual_meals (patient_id, ts_utc, name, portion, sodium_mg)
+               VALUES (?, ?, ?, ?, ?)""",
+            (patient_id, stamp, name, portion, sodium_mg),
+        )
+        return {
+            "id": int(cur.lastrowid), "ts_utc": stamp, "name": name,
+            "portion": portion, "sodium_mg": sodium_mg, "source": "manual",
+        }
+
+
+def list_manual_meals(limit: int = 25, patient_id: str = "demo-1") -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            """SELECT * FROM manual_meals WHERE patient_id = ?
+                ORDER BY ts_utc DESC LIMIT ?""",
+            (patient_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def delete_manual_meal(entry_id: int, patient_id: str = "demo-1") -> bool:
+    with connect() as conn:
+        cur = conn.execute(
+            "DELETE FROM manual_meals WHERE id = ? AND patient_id = ?",
+            (entry_id, patient_id),
+        )
+        return cur.rowcount > 0

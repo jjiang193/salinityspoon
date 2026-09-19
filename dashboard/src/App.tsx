@@ -5,13 +5,15 @@ import { SalinityChart } from './components/SalinityChart';
 import { TemperatureChart } from './components/TemperatureChart';
 import { DailyMeter } from './components/DailyMeter';
 import { BiteTable } from './components/BiteTable';
+import { LabelCheckCard } from './components/LabelCheckCard';
+import { ManualMealForm } from './components/ManualMealForm';
 import { PROBE_TEMP_MAX_C } from './types';
 
 export default function App() {
   const {
     connected, latest, points, bites, activeMealId,
     mealTotals, intake, lastError,
-    lastSubmergedTempC, lastSubmergedInRange,
+    lastSubmergedTempC, lastSubmergedInRange, labelCheck, refresh,
   } = useTelemetry();
 
   // Keyed on the last reading taken IN the liquid. Between dips the probe reads
@@ -64,7 +66,12 @@ export default function App() {
       </div>
 
       <div className="grid two" style={{ marginTop: 16 }}>
+        <LabelCheckCard check={labelCheck} activeMealId={activeMealId} />
         <DailyMeter intake={intake} />
+      </div>
+
+      <div className="grid two" style={{ marginTop: 16 }}>
+        <ManualMealForm onChange={refresh} />
         <BiteTable bites={bites} />
       </div>
     </div>

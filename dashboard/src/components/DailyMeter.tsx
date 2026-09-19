@@ -5,11 +5,11 @@ import { IntakeToday } from '../types';
  * 1,500 mg ideal is marked so the FDA limit is not read as a target.
  */
 export function DailyMeter({ intake }: { intake: IntakeToday | null }) {
-  if (!intake || intake.bite_count === 0) {
+  if (!intake || (intake.bite_count === 0 && intake.manual_count === 0)) {
     return (
       <section className="card">
         <h2>Today's sodium</h2>
-        <p className="empty">No bites logged today.</p>
+        <p className="empty">Nothing logged today.</p>
       </section>
     );
   }
@@ -27,13 +27,25 @@ export function DailyMeter({ intake }: { intake: IntakeToday | null }) {
     <section className="card">
       <h2>Today's sodium</h2>
       <p className="caption">
-        {intake.bite_count} bite{intake.bite_count === 1 ? '' : 's'} across{' '}
-        {intake.meal_count} meal{intake.meal_count === 1 ? '' : 's'}
+        {intake.bite_count} measured bite{intake.bite_count === 1 ? '' : 's'} ·{' '}
+        {intake.manual_count} self-reported item{intake.manual_count === 1 ? '' : 's'}
       </p>
 
       <div className="readouts">
         <div className="readout">
-          <div className="label">Consumed</div>
+          <div className="label">Measured</div>
+          <div className="value">
+            {Math.round(intake.measured_sodium_mg).toLocaleString()} <small>mg</small>
+          </div>
+        </div>
+        <div className="readout">
+          <div className="label">Self-reported</div>
+          <div className="value">
+            {Math.round(intake.manual_sodium_mg).toLocaleString()} <small>mg</small>
+          </div>
+        </div>
+        <div className="readout">
+          <div className="label">Total</div>
           <div className="value">
             {Math.round(intake.total_sodium_mg).toLocaleString()} <small>mg</small>
           </div>
