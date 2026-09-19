@@ -1,5 +1,14 @@
 # Sodium Sensing Spoon — System Plan (v2)
 
+> **Names in this document are historical.** It is a decision record and is left
+> as written. Since then the wire format, storage and API were renamed to follow
+> `docs/natrack-system-design.pdf` wherever NaTrack names a thing: `bite/v1` is
+> now `bite/v2`, `ts_utc` is `timestamp`, `ec25_ms_cm` is `salinityIndex`,
+> `volume_ml` is `weightGrams`, `sodium_mg` is `sodiumEstimate`, `patient_id` is
+> `patientId`, and so on. The decisions below stand; the spellings do not.
+> `docs/telemetry-schema.md` is the contract and gives the old name beside each
+> new one.
+
 Supersedes the three source documents (`HopHacks_System_Design.pdf`,
 `ESP32_to_DynamoDB.pdf`, `salinity-system-reference.html`). Where this
 disagrees with them, this wins.
