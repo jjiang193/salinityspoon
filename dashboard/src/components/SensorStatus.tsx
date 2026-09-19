@@ -28,7 +28,7 @@ export function SensorStatus({
   const counting = (latest?.submerged ?? false)
     && (latest?.temp_in_range ?? false)
     && quality >= QUALITY_THRESHOLD;
-  const ec = latest?.ec25_ms_cm ?? 0;
+  const ec = latest?.salinityIndex ?? 0;
   const relErr = ec > 0.3 ? ecRelativeError(ec) : null;
 
   return (

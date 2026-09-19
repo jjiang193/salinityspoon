@@ -28,8 +28,8 @@ from datetime import datetime, timezone
 
 import websockets
 
-SAMPLE_SCHEMA = "sample/v1"
-BITE_SCHEMA = "bite/v1"
+SAMPLE_SCHEMA = "sample/v2"
+BITE_SCHEMA = "bite/v2"
 FW_VERSION = "mock-0.2.0"
 
 COEFF_A = 0.49078
@@ -155,30 +155,34 @@ class MockSpoon:
         self.last_bite_at = now
         self.bite_id += 1
 
+        # NaTrack's bite carries grams. This spoon does not weigh: its portion is
+        # the calibrated scoop volume at 1.0 g/mL, and volume_source says so.
         vol = self.volume_mean
         sodium = g_l * SODIUM_FRACTION * vol
+        pace = self.pace_for(gap)
         low = g_l * SODIUM_FRACTION * max(0.0, vol - self.volume_sd)
         high = g_l * SODIUM_FRACTION * (vol + self.volume_sd)
 
         return {
             "schema": BITE_SCHEMA,
-            "device_id": "spoon-mock",
+            "deviceId": "spoon-mock",
             "bite_id": self.bite_id,
-            "ts_utc": utcnow_iso(),
-            "ec25_ms_cm": round(ec25, 3),
-            "temp_c": round(self.liquid_temp, 2),
+            "timestamp": utcnow_iso(),
+            "salinityIndex": round(ec25, 3),
+            "tempC": round(self.liquid_temp, 2),
             "salinity_g_l": round(g_l, 3),
             "salinity_source": "measured",
             "dilution_factor": 1.0,
-            "volume_ml": round(vol, 2),
+            "weightGrams": round(vol, 2),
             "volume_source": "default",
-            "sodium_mg": round(sodium, 2),
+            "sodiumEstimate": round(sodium, 2),
             "sodium_mg_low": round(low, 2),
             "sodium_mg_high": round(high, 2),
             "quality": quality,
             "ec_sample_count": len(self.ec_buffer),
-            "seconds_since_prev_bite": gap,
-            "pace": self.pace_for(gap),
+            "biteIntervalSec": gap,
+            "pace": pace,
+            "flags": ["fast"] if pace == "red" else [],
             "fw_version": FW_VERSION,
         }
 
@@ -221,12 +225,12 @@ class MockSpoon:
 
         return {
             "schema": SAMPLE_SCHEMA,
-            "device_id": "spoon-mock",
+            "deviceId": "spoon-mock",
             "seq": self.seq,
             "uptime_ms": int((time.time() - self.t0) * 1000),
-            "temp_c": round(temp, 2),
+            "tempC": round(temp, 2),
             "temp_in_range": temp <= PROBE_TEMP_MAX_C,
-            "ec25_ms_cm": round(ec25, 3),
+            "salinityIndex": round(ec25, 3),
             "salinity_g_l": round(ec_to_g_per_litre(ec25), 3),
             "imu": {
                 "ax": round(accel[0], 3), "ay": round(accel[1], 3), "az": round(accel[2], 3),
@@ -252,6 +256,10 @@ async def run(args: argparse.Namespace) -> None:
                 if args.temp > PROBE_TEMP_MAX_C:
                     print(f"  NOTE: {args.temp} °C is above the probe's 40 °C limit — "
                           f"every bite will be refused by the interlock")
+                # Pace against a deadline, not a fixed sleep. Windows rounds
+                # sleep(0.02) up to ~31 ms, which ran this at 32 Hz: 16 samples
+                # per 500 ms capture, under MIN_EC_SAMPLES, every bite aborted.
+                next_tick = time.perf_counter()
                 while True:
                     await ws.send(json.dumps(spoon.sample()))
                     bite = spoon.advance()
@@ -259,10 +267,11 @@ async def run(args: argparse.Namespace) -> None:
                         await ws.send(json.dumps(bite))
                         print(f"  bite #{bite['bite_id']}: "
                               f"{bite['salinity_g_l']:.2f} g/L, "
-                              f"{bite['sodium_mg']:.1f} mg Na "
+                              f"{bite['sodiumEstimate']:.1f} mg Na "
                               f"({bite['sodium_mg_low']:.0f}–{bite['sodium_mg_high']:.0f}), "
-                              f"{bite['pace']}")
-                    await asyncio.sleep(interval)
+                              f"{bite['pace']}", flush=True)
+                    next_tick += interval
+                    await asyncio.sleep(max(0.0, next_tick - time.perf_counter()))
         except Exception as exc:
             print(f"connection lost ({exc}); retrying in 2s")
             await asyncio.sleep(2)

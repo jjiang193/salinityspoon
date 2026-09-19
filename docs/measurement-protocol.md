@@ -33,8 +33,8 @@ The DS18B20 (rated −55 to +125 °C, so never itself the constraint) gates ever
 salinity measurement:
 
 ```
-temp_c ≤ 40 °C  → measure, log the bite
-temp_c > 40 °C  → refuse, LED signals wait, no bite logged
+tempC ≤ 40 °C  → measure, log the bite
+tempC > 40 °C  → refuse, LED signals wait, no bite logged
 ```
 
 This protects the probe across hundreds of test cycles and makes invalid data

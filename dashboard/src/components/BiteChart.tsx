@@ -52,14 +52,14 @@ export function BiteChart({ bites }: { bites: Bite[] }) {
     .slice()
     .reverse()
     .map((b) => ({
-      t: new Date(b.ts_utc).getTime(),
-      mg: b.sodium_mg,
+      t: new Date(b.timestamp).getTime(),
+      mg: b.sodiumEstimate,
       err: [
-        Math.max(0, b.sodium_mg - b.sodium_mg_low),
-        Math.max(0, b.sodium_mg_high - b.sodium_mg),
+        Math.max(0, b.sodiumEstimate - b.sodium_mg_low),
+        Math.max(0, b.sodium_mg_high - b.sodiumEstimate),
       ],
       saltPct: b.salinity_g_l / 10,
-      tempC: b.temp_c,
+      tempC: b.tempC,
       samples: b.ec_sample_count,
       biteId: b.bite_id,
     }));

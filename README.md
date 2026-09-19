@@ -22,14 +22,22 @@ python3 -m venv .venv
 .venv/bin/pip install -r backend/requirements.txt
 cd backend && ../.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 
-# 2. Mock spoon (new terminal)
+# 2. Demo cohort (once) — two weeks of synthetic history for the clinician view
+.venv/bin/python tools/seed_demo.py
+
+# 3. Mock spoon (new terminal)
 .venv/bin/python tools/mock_spoon.py --salt 0.62 --temp 26 --pace 9
 
-# 3. Dashboard (new terminal)
+# 4. Dashboard (new terminal)
 cd dashboard && npm install && npm run dev
 ```
 
-Open http://localhost:5173.
+Open http://localhost:5173. NaTrack's three views: **Clinician** (a roster of five
+synthetic patients, each against their own sodium target), **Patient portal**
+(start a meal, log food and blood pressure, see a month of history) and **Live**
+(whoever holds the spoon, as it happens).
+
+On Windows the venv's interpreter is `.venv/Scripts/python`, not `.venv/bin/`.
 
 `--host 0.0.0.0` on the backend matters: the ESP32 connects from another machine,
 so binding to localhost makes the spoon invisible.
@@ -74,8 +82,9 @@ ESP32 ──WiFi/WebSocket──► FastAPI ──WebSocket──► React dashb
 
 Everything is built around **one contract** —
 [`docs/telemetry-schema.md`](docs/telemetry-schema.md). Firmware, mock, backend
-and dashboard all speak it, in two event types: high-rate `sample/v1` that stays
-local, and `bite/v1`, the durable record.
+and dashboard all speak it, in two event types: high-rate `sample/v2` that stays
+local, and `bite/v2`, the durable record. Field names follow
+`docs/natrack-system-design.pdf` wherever NaTrack names the field.
 
 ### The accelerometer decides which readings count
 
@@ -145,6 +154,7 @@ than any single bite.
 | `backend/app/` | FastAPI — ingest, broadcast, meal segmentation, SQLite |
 | `dashboard/` | React + Vite + TypeScript |
 | `tools/mock_spoon.py` | Simulator running the same state machine |
+| `tools/seed_demo.py` | Synthetic history for the demo cohort; `--reset` removes it |
 | `tools/replay.py` | Replays a recorded session through the live pipeline |
 | `docs/` | Contract, measurement protocol, bite detection, wiring, calibration |
 

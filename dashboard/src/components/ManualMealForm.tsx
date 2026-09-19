@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { ManualMeal } from '../types';
-import { shortTime } from '../lib/time';
+import { dayAndTime } from '../lib/time';
 
 /**
  * The spoon only reads liquids. Without this the daily total is blind to bread,
@@ -9,7 +9,7 @@ import { shortTime } from '../lib/time';
  * Kept visibly separate from measured bites. Partial monitoring you are honest
  * about beats a total that quietly under-reports.
  */
-export function ManualMealForm({ onChange }: { onChange: () => void }) {
+export function ManualMealForm({ patientId, onChange }: { patientId: string; onChange: () => void }) {
   const [entries, setEntries] = useState<ManualMeal[]>([]);
   const [name, setName] = useState('');
   const [portion, setPortion] = useState('');
@@ -18,13 +18,13 @@ export function ManualMealForm({ onChange }: { onChange: () => void }) {
 
   async function refresh() {
     try {
-      setEntries(await fetch('/api/manual-meals?limit=10').then((r) => r.json()));
+      setEntries(await fetch(`/api/manual-meals?limit=10&patientId=${patientId}`).then((r) => r.json()));
     } catch {
       /* the connection pill already reports a dead backend */
     }
   }
 
-  useEffect(() => { refresh(); }, []);
+  useEffect(() => { refresh(); }, [patientId]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -40,6 +40,7 @@ export function ManualMealForm({ onChange }: { onChange: () => void }) {
         name: name.trim(),
         portion: portion.trim() || null,
         sodium_mg: mg,
+        patientId,
       }),
     });
     if (!res.ok) return setError('Could not save that entry.');
@@ -50,7 +51,7 @@ export function ManualMealForm({ onChange }: { onChange: () => void }) {
   }
 
   async function remove(id: number) {
-    await fetch(`/api/manual-meals/${id}`, { method: 'DELETE' });
+    await fetch(`/api/manual-meals/${id}?patientId=${patientId}`, { method: 'DELETE' });
     await refresh();
     onChange();
   }
@@ -86,7 +87,7 @@ export function ManualMealForm({ onChange }: { onChange: () => void }) {
           <tbody>
             {entries.map((e) => (
               <tr key={e.id}>
-                <td>{shortTime(e.ts_utc)}</td>
+                <td className="nowrap">{dayAndTime(e.ts_utc)}</td>
                 <td className="primary">{e.name}</td>
                 <td>{e.portion ?? '—'}</td>
                 <td className="num primary">{e.sodium_mg.toFixed(0)} mg</td>

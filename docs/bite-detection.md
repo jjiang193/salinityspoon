@@ -32,7 +32,7 @@ IDLE ──submerged──► WETTING ──150 ms──► CAPTURE ──lift�
 | `WETTING` | submerged | **Discard 150 ms.** Probe film formation is a transient and the first samples lie |
 | `CAPTURE` | wetting done | Accumulate EC at 100 Hz while submerged |
 | `CONFIRM` | EC drops **and** IMU sees a lift | Require both — either alone is noise |
-| `LOG` | confirmed | Median of CAPTURE samples → `bite/v1` |
+| `LOG` | confirmed | Median of CAPTURE samples → `bite/v2` |
 | `ABORT` | EC σ too high, or < 20 samples, or temperature out of range | Discard, log nothing |
 
 ### Why median, not mean
@@ -48,7 +48,7 @@ both is what keeps the count honest.
 
 ## Temperature gating
 
-`temp_c > 40 °C` forces `ABORT`. No bite is logged, and the LED signals wait.
+`tempC > 40 °C` forces `ABORT`. No bite is logged, and the LED signals wait.
 
 The DS18B20's 750 ms conversion cannot keep up with bites — and does not need
 to. Liquid temperature changes slowly. **Read it at 1 Hz, hold the last value,
@@ -56,7 +56,7 @@ and never block the EC loop on it.**
 
 ## Pace cue
 
-Driven entirely by `seconds_since_prev_bite`. No extra sensor.
+Driven entirely by `biteIntervalSec`. No extra sensor.
 
 | Gap | LED | Rationale |
 |---|---|---|
