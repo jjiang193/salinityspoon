@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  Bite, ChartPoint, IntakeToday, LabelCheck, LiveMessage, Meal, MealTotals,
+  Bite, ChartPoint, LabelCheck, LiveMessage, Meal, MealTotals,
   QUALITY_THRESHOLD, Sample,
 } from '../types';
+import { getJson } from '../lib/api';
 
 /** ~2 minutes of history at the 10 Hz publish rate. */
 const MAX_POINTS = 1200;
@@ -12,23 +13,35 @@ const FLUSH_MS = 200;
 
 const MAX_RECENT_BITES = 40;
 
+/**
+ * One patient's live session: NaTrack's /session/{patientId}.
+ *
+ * The socket carries that patient's bites and meals and nothing about anyone
+ * else. Stored data (today's intake, history) is not here - it is fetched with
+ * useApi, and refetched whenever `revision` moves.
+ */
 export interface TelemetryState {
+  /** The session socket is open. Says nothing about the spoon. */
   connected: boolean;
+  /** This patient holds the spoon: samples and bites will arrive here. */
+  holder: boolean;
+  /** Someone else is mid-meal with the spoon. Deliberately anonymous. */
+  spoonBusyElsewhere: boolean;
   latest: Sample | null;
   points: ChartPoint[];
   bites: Bite[];
   activeMealId: number | null;
   mealTotals: MealTotals | null;
-  meals: Meal[];
-  intake: IntakeToday | null;
   lastError: string | null;
   /** Temperature of the last reading taken *in* the liquid, not in air. */
   lastSubmergedTempC: number | null;
   /** Whether that reading was inside the probe's range. Null until first dip. */
   lastSubmergedInRange: boolean | null;
   labelCheck: LabelCheck | null;
-  /** Lets the manual-entry form pull fresh totals after it writes. */
-  refresh: () => void;
+  /** Moves whenever stored data has changed. Depend on it to refetch. */
+  revision: number;
+  /** For writes the socket does not announce, such as a manual entry. */
+  bump: () => void;
 }
 
 function toPoint(msg: Extract<LiveMessage, { type: 'sample' }>): ChartPoint {
@@ -37,10 +50,10 @@ function toPoint(msg: Extract<LiveMessage, { type: 'sample' }>): ChartPoint {
   const counts = d.submerged && d.temp_in_range && d.quality >= QUALITY_THRESHOLD;
   return {
     t: new Date(msg.received_at).getTime(),
-    ec25_ms_cm: d.ec25_ms_cm,
+    salinityIndex: d.salinityIndex,
     salinity_g_l: d.salinity_g_l,
     salt_pct: saltPct,
-    temp_c: d.temp_c,
+    tempC: d.tempC,
     temp_in_range: d.temp_in_range,
     quality: d.quality,
     submerged: d.submerged,
@@ -50,87 +63,84 @@ function toPoint(msg: Extract<LiveMessage, { type: 'sample' }>): ChartPoint {
   };
 }
 
-export function useTelemetry(): TelemetryState {
+const biteKey = (b: Bite) => `${b.deviceId}-${b.bite_id}-${b.timestamp}`;
+
+/** Pass null for a view with no patient in it; nothing connects. */
+export function useTelemetry(patientId: string | null): TelemetryState {
   const [connected, setConnected] = useState(false);
+  const [holder, setHolder] = useState(false);
+  const [spoonBusyElsewhere, setSpoonBusyElsewhere] = useState(false);
   const [latest, setLatest] = useState<Sample | null>(null);
   const [points, setPoints] = useState<ChartPoint[]>([]);
   const [bites, setBites] = useState<Bite[]>([]);
   const [activeMealId, setActiveMealId] = useState<number | null>(null);
   const [mealTotals, setMealTotals] = useState<MealTotals | null>(null);
-  const [meals, setMeals] = useState<Meal[]>([]);
-  const [intake, setIntake] = useState<IntakeToday | null>(null);
   const [lastError, setLastError] = useState<string | null>(null);
   const [lastSubmergedTempC, setLastSubmergedTempC] = useState<number | null>(null);
   const [lastSubmergedInRange, setLastSubmergedInRange] = useState<boolean | null>(null);
   const [labelCheck, setLabelCheck] = useState<LabelCheck | null>(null);
+  const [revision, setRevision] = useState(0);
 
   const buffer = useRef<ChartPoint[]>([]);
   const pendingLatest = useRef<Sample | null>(null);
-  const seeded = useRef(false);
   const pendingSubmerged = useRef<{ temp: number | null; inRange: boolean } | null>(null);
 
-  async function refreshHistory() {
-    try {
-      const [m, i] = await Promise.all([
-        fetch('/api/meals?limit=25').then((r) => r.json()),
-        fetch('/api/intake/today').then((r) => r.json()),
-      ]);
-      setMeals(m);
-      setIntake(i);
-
-      // Opening the dashboard mid-meal should not show an empty chart beside a
-      // large total. Backfill the open meal's bites once, from the server.
-      if (!seeded.current) {
-        seeded.current = true;
-        const open = (m as Meal[]).find((meal) => meal.ended_at === null);
-        if (open) {
-          try {
-            const detail = await fetch(`/api/meals/${open.id}`).then((r) => r.json());
-            const past: Bite[] = (detail.bites ?? []).slice(-MAX_RECENT_BITES).reverse();
-            if (past.length) {
-              setActiveMealId(open.id);
-              setMealTotals({
-                bite_count: open.bite_count,
-                total_sodium_mg: open.total_sodium_mg,
-                total_sodium_mg_low: open.total_sodium_mg_low,
-                total_sodium_mg_high: open.total_sodium_mg_high,
-                total_volume_ml: open.total_volume_ml,
-              });
-              // Live bites may already have arrived; keep them ahead of history.
-              setBites((live) => {
-                const seen = new Set(live.map((b) => `${b.device_id}-${b.bite_id}-${b.ts_utc}`));
-                return [...live, ...past.filter(
-                  (b) => !seen.has(`${b.device_id}-${b.bite_id}-${b.ts_utc}`),
-                )].slice(0, MAX_RECENT_BITES);
-              });
-            }
-          } catch {
-            /* the chart simply starts from live bites instead */
-          }
-        }
-      }
-    } catch {
-      // A dead backend already shows as a disconnected socket; no need to
-      // shout about it twice.
-    }
-  }
+  const bump = () => setRevision((r) => r + 1);
 
   useEffect(() => {
-    refreshHistory();
+    // A different patient is a different session. Nothing carries over: the
+    // last person's soup must not be on this person's screen for even a frame.
+    setConnected(false); setHolder(false); setSpoonBusyElsewhere(false);
+    setLatest(null); setPoints([]); setBites([]);
+    setActiveMealId(null); setMealTotals(null); setLastError(null);
+    setLastSubmergedTempC(null); setLastSubmergedInRange(null); setLabelCheck(null);
+    buffer.current = []; pendingLatest.current = null; pendingSubmerged.current = null;
+
+    if (patientId === null) return;
 
     let ws: WebSocket | null = null;
     let retry: ReturnType<typeof setTimeout> | null = null;
     let closed = false;
+    let backfilled: number | null = null;
+
+    // Opening the dashboard mid-meal should not show an empty chart beside a
+    // large total. Backfill the open meal's bites once, from the server.
+    async function backfill(mealId: number) {
+      if (backfilled === mealId) return;
+      backfilled = mealId;
+      try {
+        const detail = await getJson<{ meal: Meal; bites: Bite[] }>(`/api/meals/${mealId}`);
+        if (closed) return;
+        const past = detail.bites.slice(-MAX_RECENT_BITES).reverse();
+        if (!past.length) return;
+        setMealTotals((live) => live ?? detail.meal);
+        // Live bites may already have arrived; keep them ahead of history.
+        setBites((live) => {
+          const seen = new Set(live.map(biteKey));
+          return [...live, ...past.filter((b) => !seen.has(biteKey(b)))]
+            .slice(0, MAX_RECENT_BITES);
+        });
+      } catch {
+        /* the chart simply starts from live bites instead */
+      }
+    }
 
     const connect = () => {
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      ws = new WebSocket(`${proto}://${location.host}/ws/live`);
+      ws = new WebSocket(`${proto}://${location.host}/session/${patientId}`);
 
       ws.onopen = () => setConnected(true);
 
       ws.onmessage = (ev) => {
         const msg: LiveMessage = JSON.parse(ev.data);
         switch (msg.type) {
+          case 'spoon':
+            setHolder(msg.holder);
+            setSpoonBusyElsewhere(msg.busy);
+            setActiveMealId(msg.mealId);
+            if (msg.mealId !== null) backfill(msg.mealId);
+            if (!msg.holder) { setLatest(null); pendingLatest.current = null; }
+            break;
           case 'sample':
             pendingLatest.current = msg.data;
             buffer.current.push(toPoint(msg));
@@ -138,27 +148,31 @@ export function useTelemetry(): TelemetryState {
               // Latch it. A dip lasts well under a second; without this the
               // out-of-range warning would flash and vanish before it is read.
               pendingSubmerged.current = {
-                temp: msg.data.temp_c,
+                temp: msg.data.tempC,
                 inRange: msg.data.temp_in_range,
               };
             }
             break;
           case 'bite':
-            setBites((prev) => [msg.data, ...prev].slice(0, MAX_RECENT_BITES));
+            setBites((prev) => (prev.some((b) => biteKey(b) === biteKey(msg.data))
+              ? prev
+              : [msg.data, ...prev].slice(0, MAX_RECENT_BITES)));
             setMealTotals(msg.meal_totals);
-            setActiveMealId(msg.meal_id);
+            setActiveMealId(msg.mealId);
             setLastError(null);
             if (msg.label_check) setLabelCheck(msg.label_check);
-            refreshHistory();
+            bump();
             break;
           case 'meal_started':
-            setActiveMealId(msg.meal_id);
+            setActiveMealId(msg.mealId);
             setMealTotals(null);
             setLabelCheck(null);
+            setBites([]);
+            bump();
             break;
           case 'meal_ended':
             setActiveMealId(null);
-            refreshHistory();
+            bump();
             break;
           case 'error':
             // Interlock refusals arrive here. Surfacing them is the point:
@@ -200,12 +214,11 @@ export function useTelemetry(): TelemetryState {
       clearInterval(flush);
       ws?.close();
     };
-  }, []);
+  }, [patientId]);
 
   return {
-    connected, latest, points, bites, activeMealId,
-    mealTotals, meals, intake, lastError,
-    lastSubmergedTempC, lastSubmergedInRange,
-    labelCheck, refresh: refreshHistory,
+    connected, holder, spoonBusyElsewhere, latest, points, bites, activeMealId,
+    mealTotals, lastError, lastSubmergedTempC, lastSubmergedInRange,
+    labelCheck, revision, bump,
   };
 }

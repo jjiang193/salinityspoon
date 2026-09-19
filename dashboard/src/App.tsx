@@ -1,129 +1,92 @@
-import { useState } from 'react';
 import { useTelemetry } from './hooks/useTelemetry';
-import { MealHero } from './components/MealHero';
-import { SensorStatus } from './components/SensorStatus';
-import { SalinityChart } from './components/SalinityChart';
-import { TemperatureChart } from './components/TemperatureChart';
-import { DailyMeter } from './components/DailyMeter';
-import { BiteTable } from './components/BiteTable';
-import { BiteChart } from './components/BiteChart';
-import { SodiumProjection } from './components/SodiumProjection';
-import { LabelCheckCard } from './components/LabelCheckCard';
-import { ManualMealForm } from './components/ManualMealForm';
+import { useApi } from './hooks/useApi';
+import { DEFAULT_PATIENT_ID, href, useRoute } from './lib/route';
+import { ClinicianRoster } from './views/ClinicianRoster';
+import { ClinicianPatient } from './views/ClinicianPatient';
+import { PatientView } from './views/PatientView';
+import { LiveView } from './views/LiveView';
 import { Chip } from './components/Chip';
-import { FoodMatrixSelector } from './components/FoodMatrixSelector';
-import { EchoDebriefCard } from './components/EchoDebriefCard';
-import { SystemLimitsCard } from './components/SystemLimitsCard';
+import { ThemeToggle } from './components/ThemeToggle';
 import * as sev from './lib/severity';
 import { PROBE_TEMP_MAX_C } from './types';
 
+interface Spoon { patientId: string; mealId: number | null; deviceId: string | null }
+
+/**
+ * NaTrack's three views: the clinician dashboard, the patient portal, the live
+ * session.
+ *
+ * A live session belongs to one patient (/session/{patientId}), so the socket
+ * follows whoever is on screen: the patient in the portal, the patient in the
+ * clinician's chart, or - on the Live tab - whoever holds the spoon. The roster
+ * shows every patient and so has no session; it polls.
+ */
 export default function App() {
-  const {
-    connected, latest, points, bites, activeMealId,
-    mealTotals, intake, lastError,
-    lastSubmergedTempC, lastSubmergedInRange, labelCheck, refresh,
-  } = useTelemetry();
+  const route = useRoute();
 
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'advanced'>('dashboard');
+  // Who holds the spoon. Polled: it changes when someone starts a meal, which
+  // no single patient's session is entitled to hear about.
+  const spoon = useApi<Spoon>('/api/spoon', 0, 5000);
+  const holderId = spoon.data?.patientId ?? null;
 
-  // Keyed on the last reading taken IN the liquid. Between dips the probe reads
-  // room air, which is in range and tells us nothing about the soup.
-  const outOfRange = lastSubmergedInRange === false;
+  const sessionPatientId = route.view === 'live' ? holderId : route.patientId;
+  const telemetry = useTelemetry(sessionPatientId);
+
+  // With no session open, the roster's own polling is the evidence of a link.
+  const connected = sessionPatientId !== null ? telemetry.connected : spoon.error === null;
+
+  // The Patient tab remembers whose chart you were just reading.
+  const portalPatientId =
+    (route.view !== 'live' && route.patientId) || holderId || DEFAULT_PATIENT_ID;
 
   return (
     <div className="app">
       <header className="masthead">
-        <div>
-          <h1>Salinity Spoon</h1>
-          <p className="sub">Salt in liquids, 0–{PROBE_TEMP_MAX_C} °C → sodium you can act on</p>
+        <div className="brand">
+          <span className="brand-mark" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 3.5c3 3.6 5.5 6.6 5.5 10a5.5 5.5 0 0 1-11 0c0-3.4 2.5-6.4 5.5-10z" />
+              <path d="M9.5 14.5h5M12 12v5" />
+            </svg>
+          </span>
+          <div>
+            <h1>Salinity Spoon</h1>
+            <p className="sub">
+              Sodium monitoring for sodium-restricted diets · measures liquids, 0–{PROBE_TEMP_MAX_C} °C
+            </p>
+          </div>
         </div>
-        <Chip indicator={sev.connection(connected)} />
+        <div className="masthead-tools">
+          <Chip indicator={sev.connection(connected)} />
+          <ThemeToggle />
+        </div>
       </header>
 
-      {/* Tab Navigation */}
-      <div style={{ display: 'flex', gap: '1rem', borderBottom: '1px solid var(--border)', margin: '0 0 20px 0' }}>
-        <button 
-          onClick={() => setActiveTab('dashboard')}
-          style={{ 
-            padding: '8px 16px', background: 'none', border: 'none', cursor: 'pointer',
-            borderBottom: activeTab === 'dashboard' ? '3px solid var(--series-salinity)' : '3px solid transparent',
-            color: activeTab === 'dashboard' ? 'var(--text-primary)' : 'var(--text-secondary)',
-            fontWeight: activeTab === 'dashboard' ? 'bold' : 'normal'
-          }}
-        >
-          Dashboard
-        </button>
-        <button 
-          onClick={() => setActiveTab('advanced')}
-          style={{ 
-            padding: '8px 16px', background: 'none', border: 'none', cursor: 'pointer',
-            borderBottom: activeTab === 'advanced' ? '3px solid var(--series-salinity)' : '3px solid transparent',
-            color: activeTab === 'advanced' ? 'var(--text-primary)' : 'var(--text-secondary)',
-            fontWeight: activeTab === 'advanced' ? 'bold' : 'normal'
-          }}
-        >
-          Advanced Analysis
-        </button>
-      </div>
+      <nav className="tabs" aria-label="Views">
+        <a href={href({ view: 'clinician', patientId: null })}
+           aria-current={route.view === 'clinician' ? 'page' : undefined}>
+          Clinician
+        </a>
+        <a href={href({ view: 'patient', patientId: portalPatientId, tab: 'today' })}
+           aria-current={route.view === 'patient' ? 'page' : undefined}>
+          Patient portal
+        </a>
+        <a href={href({ view: 'live' })}
+           aria-current={route.view === 'live' ? 'page' : undefined}>
+          Live
+        </a>
+        <span className="tabs-note">Demo build · synthetic patients · no sign-in</span>
+      </nav>
 
-      {outOfRange && (
-        <div className="banner-warn">
-          <strong>Liquid is out of the probe's range
-          {lastSubmergedTempC !== null && ` — last measured ${lastSubmergedTempC.toFixed(1)} °C`}.</strong>{' '}
-          The DFR0300 is rated 0–{PROBE_TEMP_MAX_C} °C. No bites will be logged until it
-          cools — a reading taken outside that range is not less precise, it is
-          unsupported.
-        </div>
-      )}
-
-      {lastError && !outOfRange && (
-        <div className="banner-warn"><strong>Last refusal:</strong> {lastError}</div>
-      )}
-
-      {activeTab === 'dashboard' ? (
-        <>
-          <div className="grid hero">
-            <MealHero totals={mealTotals} activeMealId={activeMealId} />
-            <div className="stack">
-              <SensorStatus
-              connected={connected}
-              latest={latest}
-              lastError={lastError}
-              lastSubmergedTempC={lastSubmergedTempC}
-              lastSubmergedInRange={lastSubmergedInRange}
-            />
-            </div>
-          </div>
-
-          <div className="grid two" style={{ marginTop: 16 }}>
-            <BiteChart bites={bites} />
-            <SodiumProjection bites={bites} intake={intake} />
-          </div>
-
-          <div className="grid two" style={{ marginTop: 16 }}>
-            <LabelCheckCard check={labelCheck} activeMealId={activeMealId} />
-            <DailyMeter intake={intake} />
-          </div>
-
-          <details className="card diag" style={{ marginTop: 16 }}>
-            <summary>Signal diagnostics — sample-level traces</summary>
-            <div className="grid two">
-              <SalinityChart points={points} />
-              <TemperatureChart points={points} />
-            </div>
-          </details>
-
-          <div className="grid two" style={{ marginTop: 16 }}>
-            <ManualMealForm onChange={refresh} />
-            <BiteTable bites={bites} />
-          </div>
-        </>
+      {route.view === 'live' ? (
+        <LiveView patientId={holderId} telemetry={telemetry} />
+      ) : route.view === 'patient' ? (
+        <PatientView patientId={route.patientId} tab={route.tab} telemetry={telemetry} />
+      ) : route.patientId ? (
+        <ClinicianPatient patientId={route.patientId} telemetry={telemetry} />
       ) : (
-        <div className="stack" style={{ gap: '16px' }}>
-          <FoodMatrixSelector activeMealId={activeMealId} onChange={refresh} />
-          <EchoDebriefCard activeMealId={activeMealId} />
-          <SystemLimitsCard />
-        </div>
+        <ClinicianRoster />
       )}
     </div>
   );

@@ -4,18 +4,23 @@
 
 --host 0.0.0.0 matters: the ESP32 connects from another machine on the network,
 so binding to localhost makes the spoon invisible.
+
+Two route families, and the split is the contract (docs/telemetry-schema.md):
+
+    /v1/...   and  /session/{patientId}   NaTrack's API, at NaTrack's paths
+    /api/...  and  /ws/ingest             everything NaTrack does not cover
 """
 
 import json
 from datetime import datetime
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ValidationError
 
-from typing import Optional
+from typing import Literal, Optional
 
-from . import labels, salinity, store
+from . import cohort, labels, salinity, store
 from .hub import Hub, MealTracker
 from .recorder import Recorder
 from .schema import BITE_SCHEMA, SAMPLE_SCHEMA, Bite, Sample, utcnow_iso
@@ -46,8 +51,9 @@ def _startup() -> None:
 async def ws_ingest(ws: WebSocket) -> None:
     """The spoon (or tools/mock_spoon.py) connects here.
 
-    Accepts both sample/v1 and bite/v1 on one socket, dispatched on the
-    `schema` field.
+    Accepts both sample/v2 and bite/v2 on one socket, dispatched on the
+    `schema` field. NaTrack's cloud ingest is MQTT; this is the local transport
+    carrying the same bite.
     """
     await ws.accept()
     try:
@@ -67,9 +73,11 @@ async def ws_ingest(ws: WebSocket) -> None:
                 elif kind == BITE_SCHEMA:
                     await _handle_bite(payload)
                 else:
-                    await ws.send_text(
-                        json.dumps({"type": "error", "detail": f"unknown schema {kind!r}"})
-                    )
+                    await ws.send_text(json.dumps({
+                        "type": "error",
+                        "detail": f"unknown schema {kind!r}; this backend speaks "
+                                  f"{SAMPLE_SCHEMA} and {BITE_SCHEMA}",
+                    }))
             except ValidationError as exc:
                 await ws.send_text(json.dumps({"type": "error", "detail": str(exc)}))
     except WebSocketDisconnect:
@@ -81,11 +89,12 @@ async def _handle_sample(payload: dict) -> None:
     message = {
         "type": "sample",
         "received_at": utcnow_iso(),
-        "meal_id": meals.meal_id,
+        "mealId": meals.meal_id,
+        "patientId": meals.patient_id,
         "data": payload,
     }
     hub.last_sample = message
-    await hub.broadcast(message)
+    await hub.send(meals.patient_id, message)
 
 
 async def _handle_bite(payload: dict) -> None:
@@ -94,18 +103,19 @@ async def _handle_bite(payload: dict) -> None:
     # The interlock is enforced here too, not only on the device. A bite
     # measured outside the probe's range is not a less-precise bite, it is an
     # unsupported one, and it must not enter the record.
-    if not salinity.temp_in_range(bite.temp_c):
-        await hub.broadcast(
+    if not salinity.temp_in_range(bite.tempC):
+        await hub.send(
+            meals.patient_id,
             {
                 "type": "error",
-                "detail": f"bite rejected: {bite.temp_c} °C outside probe range "
+                "detail": f"bite rejected: {bite.tempC} °C outside probe range "
                           f"{salinity.PROBE_TEMP_MIN_C}–{salinity.PROBE_TEMP_MAX_C} °C",
-            }
+            },
         )
         return
 
     meal_id = await meals.assign(payload)
-    stored = store.insert_bite(meal_id, payload)
+    stored = store.insert_bite(meal_id, payload, meals.patient_id)
     if not stored:
         return  # idempotent replay, already recorded
 
@@ -117,7 +127,8 @@ async def _handle_bite(payload: dict) -> None:
     message = {
         "type": "bite",
         "received_at": utcnow_iso(),
-        "meal_id": meal_id,
+        "mealId": meal_id,
+        "patientId": meals.patient_id,
         "data": payload,
         "meal_totals": totals,
         "label_check": {
@@ -126,29 +137,186 @@ async def _handle_bite(payload: dict) -> None:
         },
     }
     hub.last_bite = message
-    await hub.broadcast(message)
+    await hub.send(meals.patient_id, message)
 
 
-# --- Live feed ---------------------------------------------------------------
-@app.websocket("/ws/live")
-async def ws_live(ws: WebSocket) -> None:
-    """The dashboard connects here."""
+# --- Live session ------------------------------------------------------------
+@app.websocket("/session/{patient_id}")
+async def ws_session(ws: WebSocket, patient_id: str) -> None:
+    """NaTrack's live session: one patient's bites, as they land."""
     await ws.accept()
-    await hub.register(ws)
+    if not store.get_patient(patient_id):
+        await ws.close(code=4404, reason="patient not found")
+        return
+
+    await hub.register(ws, patient_id)
     try:
-        # Prime a freshly-opened tab so it is not staring at an empty chart.
-        for primer in (hub.last_bite, hub.last_sample):
-            if primer:
-                await ws.send_text(json.dumps(primer))
+        await ws.send_text(json.dumps(meals.spoon_state(patient_id)))
+        # Prime a freshly-opened tab so it is not staring at an empty chart -
+        # but only with this patient's own data.
+        if patient_id == meals.patient_id:
+            for primer in (hub.last_bite, hub.last_sample):
+                if primer and primer["patientId"] == patient_id:
+                    await ws.send_text(json.dumps(primer))
         while True:
             await ws.receive_text()  # keepalive / future client commands
     except WebSocketDisconnect:
         pass
     finally:
-        await hub.unregister(ws)
+        await hub.unregister(ws, patient_id)
 
 
-# --- REST --------------------------------------------------------------------
+def _require_patient(patient_id: str) -> dict:
+    """Every patient-scoped endpoint passes through here.
+
+    There is no sign-in yet, so this only checks the patient exists. PLAN.md §9
+    is explicit that it must become can_access(user, patient_id) before any of
+    this leaves a laptop, and this is the one place that check belongs.
+    """
+    patient = store.get_patient(patient_id)
+    if not patient:
+        raise HTTPException(404, "patient not found")
+    return patient
+
+
+def _in_meal(patient_id: str) -> bool:
+    return meals.meal_id is not None and meals.patient_id == patient_id
+
+
+def _with_label_check(meal: dict) -> dict:
+    check = cohort.label_check(meal)
+    return {
+        **meal,
+        "label_claim_label": labels.CLAIM_LABEL.get(meal["label_claim"]),
+        "label_flagged": bool(check and check.flagged),
+        "label_headline": check.headline if check else None,
+    }
+
+
+# =============================================================================
+# NaTrack API - /v1
+# =============================================================================
+@app.get("/v1/patients")
+def list_patients(
+    clinicianId: Optional[str] = None, tz_offset_min: int = 0
+) -> list[dict]:
+    """The clinician's roster: every patient, with a trailing-window summary."""
+    return [
+        cohort.summarise(p, tz_offset_min, in_meal=_in_meal(p["patientId"]))
+        for p in store.list_patients(clinicianId)
+    ]
+
+
+@app.get("/v1/patients/{patient_id}/summary")
+def patient_summary(
+    patient_id: str,
+    range: Literal["day", "week", "month"] = "week",
+    tz_offset_min: int = 0,
+) -> dict:
+    """Precomputed trend, sodium and pace. `range` sets the length of `daily`;
+    the averages always cover the last seven full days."""
+    patient = _require_patient(patient_id)
+    return {
+        **cohort.summarise(
+            patient, tz_offset_min, in_meal=_in_meal(patient_id),
+            history_days=cohort.RANGE_DAYS[range],
+        ),
+        "range": range,
+        "meals": [_with_label_check(m) for m in store.list_meals(60, patient_id)],
+        "manual_meals": store.list_manual_meals(40, patient_id),
+    }
+
+
+@app.get("/v1/patients/{patient_id}/bites")
+def patient_bites(
+    patient_id: str,
+    since: Optional[str] = Query(None, alias="from"),
+    until: Optional[str] = Query(None, alias="to"),
+) -> list[dict]:
+    """Time-ranged raw bites, oldest first. `from` and `to` are ISO-8601."""
+    _require_patient(patient_id)
+    try:
+        return store.bites_between(patient_id, since, until)
+    except ValueError:
+        raise HTTPException(400, "from and to must be ISO-8601 timestamps")
+
+
+class PatientTarget(BaseModel):
+    sodiumTarget: float
+
+
+@app.put("/v1/patients/{patient_id}/target")
+def set_patient_target(patient_id: str, body: PatientTarget) -> dict:
+    """Set the daily sodium target. Clinician-side only."""
+    _require_patient(patient_id)
+    if not cohort.TARGET_MIN_MG <= body.sodiumTarget <= cohort.TARGET_MAX_MG:
+        raise HTTPException(
+            400,
+            f"target must be between {cohort.TARGET_MIN_MG} and "
+            f"{cohort.TARGET_MAX_MG} mg per day",
+        )
+    return store.set_patient_target(patient_id, round(body.sodiumTarget))
+
+
+class HealthLogEntry(BaseModel):
+    systolic: Optional[int] = None
+    diastolic: Optional[int] = None
+    weightKg: Optional[float] = None
+    note: Optional[str] = None
+
+
+# Reject implausible entries (PLAN.md §7). A systolic of 400 is a typo, and a
+# typo stored in a medical record misleads whoever reads it next.
+HEALTH_RANGES = {"systolic": (60, 260), "diastolic": (30, 160), "weightKg": (20, 350)}
+
+
+@app.post("/v1/patients/{patient_id}/health-log")
+def add_health_log(patient_id: str, entry: HealthLogEntry) -> dict:
+    """The patient logs blood pressure, weight, or a note."""
+    _require_patient(patient_id)
+    note = (entry.note or "").strip() or None
+
+    if (entry.systolic is None) != (entry.diastolic is None):
+        raise HTTPException(400, "blood pressure needs both systolic and diastolic")
+    if entry.systolic is None and entry.weightKg is None and note is None:
+        raise HTTPException(400, "nothing to log: give a blood pressure, a weight or a note")
+    for field, (low, high) in HEALTH_RANGES.items():
+        value = getattr(entry, field)
+        if value is not None and not low <= value <= high:
+            raise HTTPException(400, f"{field} must be between {low} and {high}")
+    if entry.systolic is not None and entry.diastolic >= entry.systolic:
+        raise HTTPException(400, "diastolic must be lower than systolic")
+
+    return store.add_health_log(
+        patient_id, entry.systolic, entry.diastolic, entry.weightKg, note
+    )
+
+
+@app.get("/v1/patients/{patient_id}/health-log")
+def list_health_log(patient_id: str, limit: int = 30) -> list[dict]:
+    """NaTrack specifies only the write; a log nobody can read is not much use."""
+    _require_patient(patient_id)
+    return store.list_health_logs(patient_id, limit)
+
+
+class DevicePairing(BaseModel):
+    patientId: str
+
+
+@app.post("/v1/devices/{device_id}/pair")
+async def pair_device(device_id: str, body: DevicePairing) -> dict:
+    """Bind a spoon to a patient. Its unannounced meals are theirs from now on."""
+    _require_patient(body.patientId)
+    device = store.pair_device(device_id, body.patientId)
+    # If this is the spoon on the table, it has just changed hands.
+    if meals.device_id in (None, device_id) and meals.patient_id != body.patientId:
+        await meals.hand_to(body.patientId)
+    return device
+
+
+# =============================================================================
+# Everything NaTrack does not cover - /api
+# =============================================================================
 @app.get("/api/health")
 def health() -> dict:
     return {
@@ -162,9 +330,24 @@ def health() -> dict:
     }
 
 
+@app.get("/api/spoon")
+def spoon() -> dict:
+    """Who holds the spoon, and whether they are mid-meal.
+
+    Not called /api/session: in NaTrack a session is the live WebSocket, and
+    one word for two things is how this contract got into trouble.
+    """
+    return {
+        "patientId": meals.patient_id,
+        "mealId": meals.meal_id,
+        "deviceId": meals.device_id,
+    }
+
+
+# --- Meals -------------------------------------------------------------------
 @app.get("/api/meals")
-def list_meals(limit: int = 25) -> list[dict]:
-    return store.list_meals(limit)
+def list_meals(limit: int = 25, patientId: str = store.DEFAULT_PATIENT_ID) -> list[dict]:
+    return store.list_meals(limit, patientId)
 
 
 @app.get("/api/meals/{meal_id}")
@@ -175,10 +358,35 @@ def meal_detail(meal_id: int) -> dict:
     return meal
 
 
+class MealStart(BaseModel):
+    patientId: str = store.DEFAULT_PATIENT_ID
+    product_name: Optional[str] = None
+    label_claim: str = "none"
+
+
+@app.post("/api/meals/start")
+async def start_meal(req: MealStart) -> dict:
+    """Open a meal for a patient, optionally declaring what is in the bowl.
+
+    Bites still open a meal on their own; this exists so the session belongs to
+    the right patient and the label is checked from the first bite.
+    """
+    _require_patient(req.patientId)
+    if req.label_claim not in labels.CLAIM_LABEL:
+        raise HTTPException(
+            400, f"unknown claim; expected one of {list(labels.CLAIM_LABEL)}"
+        )
+    meal_id = await meals.start(req.patientId)
+    product = (req.product_name or "").strip() or None
+    if product or req.label_claim != "none":
+        store.set_meal_label(meal_id, product, req.label_claim)
+    return {"mealId": meal_id, "patientId": req.patientId}
+
+
 @app.post("/api/meals/close")
 async def close_meal() -> dict:
     closed = await meals.force_close()
-    return {"closed_meal_id": closed}
+    return {"mealId": closed}
 
 
 @app.get("/api/devices/{device_id}")
@@ -202,11 +410,18 @@ def set_volume(device_id: str, cal: VolumeCalibration) -> dict:
 
 
 @app.get("/api/intake/today")
-def intake_today() -> dict:
-    totals = store.intake_today()
+def intake_today(
+    patientId: str = store.DEFAULT_PATIENT_ID, tz_offset_min: int = 0
+) -> dict:
+    patient = _require_patient(patientId)
+    totals = store.intake_today(patientId, tz_offset_min)
     ctx = salinity.contextualise(totals["total_sodium_mg"])
+    target = patient["sodiumTarget"]
     return {
         **totals,
+        "patientId": patientId,
+        "sodiumTarget": target,
+        "pct_of_target": totals["total_sodium_mg"] / target * 100.0,
         "fda_daily_limit_mg": salinity.FDA_DAILY_LIMIT_MG,
         "aha_ideal_limit_mg": salinity.AHA_IDEAL_LIMIT_MG,
         "pct_of_fda_limit": ctx.pct_of_fda_limit,
@@ -228,6 +443,9 @@ def set_meal_label(label: MealLabel) -> dict:
     This is what makes the potassium flag possible: the sensor supplies the
     ionic content, the label supplies what the product says about itself, and
     the interesting case is where they disagree.
+
+    NaTrack puts potassium alerts out of scope for v1 ("possible to integrate").
+    This is that integration, kept outside /v1 for that reason.
     """
     if label.label_claim not in labels.CLAIM_LABEL:
         raise HTTPException(
@@ -237,7 +455,7 @@ def set_meal_label(label: MealLabel) -> dict:
         raise HTTPException(409, "no meal in progress — log a bite first")
     store.set_meal_label(meals.meal_id, label.product_name, label.label_claim)
     return {
-        "meal_id": meals.meal_id,
+        "mealId": meals.meal_id,
         "product_name": label.product_name,
         "label_claim": label.label_claim,
     }
@@ -368,11 +586,12 @@ def update_persona(req: PersonaRequest) -> dict:
     set_persona(req.condition, req.sodium_limit_mg)
     return {"status": "ok", "condition": req.condition, "limit": req.sodium_limit_mg}
 
-# --- Manual entries ----------------------------------------------------------
+# --- Self-reported food ------------------------------------------------------
 class ManualMeal(BaseModel):
     name: str
     sodium_mg: float
     portion: Optional[str] = None
+    patientId: str = store.DEFAULT_PATIENT_ID
 
 
 @app.post("/api/manual-meals")
@@ -387,17 +606,22 @@ def add_manual_meal(entry: ManualMeal) -> dict:
         raise HTTPException(400, "sodium_mg cannot be negative")
     if not entry.name.strip():
         raise HTTPException(400, "name is required")
-    return store.add_manual_meal(entry.name.strip(), entry.sodium_mg, entry.portion)
+    _require_patient(entry.patientId)
+    return store.add_manual_meal(
+        entry.name.strip(), entry.sodium_mg, entry.portion, patient_id=entry.patientId
+    )
 
 
 @app.get("/api/manual-meals")
-def list_manual_meals(limit: int = 25) -> list[dict]:
-    return store.list_manual_meals(limit)
+def list_manual_meals(
+    limit: int = 25, patientId: str = store.DEFAULT_PATIENT_ID
+) -> list[dict]:
+    return store.list_manual_meals(limit, patientId)
 
 
 @app.delete("/api/manual-meals/{entry_id}")
-def delete_manual_meal(entry_id: int) -> dict:
-    if not store.delete_manual_meal(entry_id):
+def delete_manual_meal(entry_id: int, patientId: str = store.DEFAULT_PATIENT_ID) -> dict:
+    if not store.delete_manual_meal(entry_id, patientId):
         raise HTTPException(404, "entry not found")
     return {"deleted": entry_id}
 

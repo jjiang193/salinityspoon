@@ -1,12 +1,16 @@
-"""Telemetry contract. See docs/telemetry-schema.md."""
+"""Telemetry contract. See docs/telemetry-schema.md.
+
+NaTrack names are camelCase; fields NaTrack does not cover keep this repo's
+snake_case. The casing is deliberate - it says whose field it is.
+"""
 
 from datetime import datetime, timezone
 from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
-SAMPLE_SCHEMA = "sample/v1"
-BITE_SCHEMA = "bite/v1"
+SAMPLE_SCHEMA = "sample/v2"
+BITE_SCHEMA = "bite/v2"
 
 # Samples below this are charted but never counted toward a salinity estimate.
 QUALITY_THRESHOLD = 0.6
@@ -14,6 +18,11 @@ QUALITY_THRESHOLD = 0.6
 Motion = Literal["still", "stirring", "moving", "unknown"]
 DetectorState = Literal["IDLE", "WETTING", "CAPTURE", "CONFIRM", "LOG", "ABORT"]
 Pace = Literal["green", "yellow", "red", "unknown"]
+VolumeSource = Literal["load_cell", "user_calibrated", "default"]
+
+# The `flags` vocabulary. Unknown flags are tolerated, not rejected: a newer
+# firmware must not lose bites to an older backend.
+FLAG_FAST = "fast"
 
 
 class IMU(BaseModel):
@@ -29,13 +38,13 @@ class Sample(BaseModel):
     """High-rate local telemetry. Never persisted beyond the session."""
 
     schema_name: str = Field(default=SAMPLE_SCHEMA, alias="schema")
-    device_id: str = "spoon-01"
+    deviceId: str = "spoon-01"
     seq: int = 0
     uptime_ms: int = 0
 
-    temp_c: Optional[float] = None
+    tempC: Optional[float] = None
     temp_in_range: bool = False
-    ec25_ms_cm: float = 0.0
+    salinityIndex: float = 0.0
     salinity_g_l: float = 0.0
 
     imu: IMU = Field(default_factory=IMU)
@@ -55,27 +64,28 @@ class Bite(BaseModel):
     """The durable record. One per scoop."""
 
     schema_name: str = Field(default=BITE_SCHEMA, alias="schema")
-    device_id: str = "spoon-01"
+    deviceId: str = "spoon-01"
     bite_id: int
-    ts_utc: str
+    timestamp: str
 
-    ec25_ms_cm: float
-    temp_c: float
+    salinityIndex: float
+    tempC: float
     salinity_g_l: float
     salinity_source: Literal["measured", "bowl_reference"] = "measured"
     dilution_factor: float = 1.0
 
-    volume_ml: float
-    volume_source: Literal["user_calibrated", "default"] = "default"
+    weightGrams: float
+    volume_source: VolumeSource = "default"
 
-    sodium_mg: float
+    sodiumEstimate: float
     sodium_mg_low: float
     sodium_mg_high: float
 
     quality: float = 0.0
     ec_sample_count: int = 0
-    seconds_since_prev_bite: Optional[float] = None
+    biteIntervalSec: Optional[float] = None
     pace: Pace = "unknown"
+    flags: list[str] = Field(default_factory=list)
     fw_version: str = "0.0.0"
 
     model_config = {"populate_by_name": True}

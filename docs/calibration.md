@@ -48,7 +48,7 @@ reports at a stable in-range temperature (20–25 °C is ideal):
 | 0.75 % | 7.5 g | 1000 mL | ~14.2 mS/cm |
 | 1.00 % | 10.0 g | 1000 mL | ~17.5 mS/cm |
 
-Use a scale with 0.1 g resolution. Dip, let settle, record `ec25_ms_cm`.
+Use a scale with 0.1 g resolution. Dip, let settle, record `salinityIndex` (the conductivity at 25 °C, in mS/cm).
 
 Fit `g/L = A·EC + B·EC²` (any spreadsheet's polynomial trendline through the
 origin) and put the coefficients in **both**:

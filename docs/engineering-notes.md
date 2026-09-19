@@ -140,7 +140,7 @@ logic was right and the behaviour was wrong.
 
 ## 9. Idempotency that silently lost data
 
-An earlier design keyed stored bites on `{timestamp}#{device_id}` with a
+An earlier design keyed stored bites on `{timestamp}#{deviceId}` with a
 "skip if exists" guard. Two genuine bites in the same second from one device
 produce an identical key, and the guard discards the second — **data loss
 disguised as deduplication**, in a system whose own requirements said a logged

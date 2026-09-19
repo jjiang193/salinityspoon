@@ -3,8 +3,12 @@ import * as sev from '../lib/severity';
 import { Chip } from './Chip';
 
 /**
- * A meter, not a chart: one value against one threshold. The AHA's stricter
- * 1,500 mg ideal is marked so the FDA limit is not read as a target.
+ * A meter, not a chart: one value against one threshold.
+ *
+ * The threshold is the patient's own target, set by their care team. The FDA's
+ * 2,300 mg and the AHA's 1,500 mg are population figures; a heart-failure
+ * patient on a 1,500 mg restriction who is shown a bar that fills at 2,300 has
+ * been shown the wrong bar.
  */
 export function DailyMeter({ intake }: { intake: IntakeToday | null }) {
   if (!intake || (intake.bite_count === 0 && intake.manual_count === 0)) {
@@ -16,15 +20,19 @@ export function DailyMeter({ intake }: { intake: IntakeToday | null }) {
     );
   }
 
-  const pct = Math.min(intake.pct_of_fda_limit, 100);
-  const idealMarkerPct = (intake.aha_ideal_limit_mg / intake.fda_daily_limit_mg) * 100;
+  const target = intake.sodiumTarget;
+  const pct = Math.min(intake.pct_of_target, 100);
+  // The AHA ideal is only worth marking when it sits inside the bar.
+  const idealMarkerPct = intake.aha_ideal_limit_mg < target
+    ? (intake.aha_ideal_limit_mg / target) * 100
+    : null;
 
-  const load = sev.dailyLoad(intake.pct_of_fda_limit);
+  const load = sev.dailyLoad(intake.pct_of_target);
   // The bar itself still carries colour at every level - it is the one place a
   // continuous magnitude is encoded, so a neutral bar would lose information.
   const barRole =
-    intake.pct_of_fda_limit >= 100 ? 'critical'
-    : intake.pct_of_fda_limit >= 80 ? 'warning'
+    intake.pct_of_target >= 100 ? 'critical'
+    : intake.pct_of_target >= 80 ? 'warning'
     : 'good';
 
   return (
@@ -57,7 +65,7 @@ export function DailyMeter({ intake }: { intake: IntakeToday | null }) {
         <div className="readout">
           <div className="label">Remaining</div>
           <div className="value">
-            {Math.max(0, Math.round(intake.fda_daily_limit_mg - intake.total_sodium_mg)).toLocaleString()}{' '}
+            {Math.max(0, Math.round(target - intake.total_sodium_mg)).toLocaleString()}{' '}
             <small>mg</small>
           </div>
         </div>
@@ -66,13 +74,15 @@ export function DailyMeter({ intake }: { intake: IntakeToday | null }) {
       <div className="meter">
         <div className="meter-track">
           <div className="meter-fill" style={{ width: `${pct}%`, background: `var(--status-${barRole})` }} />
-          <div className="meter-marker" style={{ left: `${idealMarkerPct}%` }}
-               title={`AHA ideal limit: ${intake.aha_ideal_limit_mg} mg`} />
+          {idealMarkerPct !== null && (
+            <div className="meter-marker" style={{ left: `${idealMarkerPct}%` }}
+                 title={`AHA ideal limit: ${intake.aha_ideal_limit_mg} mg`} />
+          )}
         </div>
         <div className="meter-legend">
           <span>0</span>
-          <span>AHA ideal 1,500</span>
-          <span>FDA limit 2,300</span>
+          {idealMarkerPct !== null && <span>AHA ideal 1,500</span>}
+          <span>Target {target.toLocaleString()} · set by care team</span>
         </div>
       </div>
 

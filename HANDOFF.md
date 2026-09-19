@@ -29,7 +29,8 @@ connected.** That is the single most important thing to know.
 |---|---|
 | Firmware logic | 113 host-side tests pass. **Never compiled for ESP32** |
 | Backend | Runs, verified end to end |
-| Dashboard | Builds clean, verified in both themes |
+| Dashboard | Builds clean, verified in both themes. Clinician and Patient tabs |
+| Patients | Five synthetic patients, per-patient targets. **No sign-in** — see below |
 | Simulator | Runs the same state machine as the firmware |
 | Record / replay | Verified: 1,074 events recorded, replayed, no duplicate loss |
 | Hardware | **Nothing benched. Phase 0 not started** |
@@ -55,6 +56,9 @@ python3 -m venv .venv
 # terminal 1 — backend. 0.0.0.0 matters: the ESP32 connects from another machine
 cd backend && ../.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 
+# once — two weeks of synthetic history, or the clinician roster is five empty rows
+.venv/bin/python tools/seed_demo.py
+
 # terminal 2 — simulated spoon
 .venv/bin/python tools/mock_spoon.py --salt 0.62 --temp 26 --pace 14
 
@@ -67,6 +71,11 @@ Firmware logic tests, no toolchain required:
 ```bash
 make -C firmware/test          # 113 checks
 ```
+
+On Windows: `.venv/Scripts/python`, not `.venv/bin/python`. And on Python 3.14
+the pins in `backend/requirements.txt` have no wheels — `pydantic-core` tries to
+compile and fails. `pip install fastapi uvicorn websockets` unpinned works; the
+pins themselves have not been moved.
 
 Useful simulator flags: `--temp 55` (watch every bite get refused), `--salt 0.9`,
 `--noise 0.5` (watch the quality gate reject), `--pace 6`.
@@ -128,9 +137,9 @@ limit became a feature: the device visibly refuses what it cannot support.
 
 **Local-only backend, AWS deferred.** Not a risk judgement — a sequencing one.
 Hardware bring-up is the critical path; a DynamoDB table is worth nothing if the
-probe does not read salt. `PLAN.md` §9 keeps the migration cheap: `bite/v1` is
-already the wire format, timestamps are ISO-8601 UTC, and the sort key is
-`BITE#{ts_utc}#{bite_id}`.
+probe does not read salt. `PLAN.md` §9 keeps the migration cheap: `bite/v2` is
+already the wire format and already uses NaTrack's names, timestamps are
+ISO-8601 UTC, and the sort key is `BITE#{timestamp}#{deviceId}#{bite_id}`.
 
 **Sort key includes `bite_id`.** An earlier design keyed on timestamp plus
 device with a skip-if-exists guard, which silently discarded a second genuine
@@ -142,6 +151,65 @@ temperature interlock rendered identically to "the spoon is in air". Ambient
 state is now neutral. Adding a new coloured indicator means justifying its tier.
 `verdictFor`/`VERDICT_STATUS` were deleted rather than left as a competing way
 to pick a colour — do not reintroduce one.
+
+**NaTrack names win wherever NaTrack speaks.** `docs/natrack-system-design.pdf`
+is the system design, and its entity, field and endpoint names are used as
+written: `patientId`, `sodiumEstimate`, `GET /v1/patients/{id}/summary`,
+`/session/{patientId}`. Where NaTrack is silent the original snake_case name
+stays (`sodium_mg_low`, `salinity_g_l`, `/api/meals/start`). The casing therefore
+says whose field it is — do not normalise it. NaTrack rarely gives a unit or a
+format; `docs/telemetry-schema.md` does, for every field, and is binding. Three
+calls NaTrack left open were made there and are worth knowing before you argue
+with them: `salinityIndex` is conductivity in mS/cm (not g/L); `timestamp` is
+ISO-8601 with milliseconds (not epoch); and `bite_id` stays in the dedupe key
+beside NaTrack's `deviceId` + `timestamp`, because the key without it once lost
+real bites.
+
+**Three views, one session per patient.** Clinician, Patient portal, Live — NaTrack's
+three. A live session is `/session/{patientId}` and carries that patient's events
+only; another patient's session is told the spoon is `busy` and never by whom.
+`useTelemetry(patientId)` follows whoever is on screen, the roster has no session
+and polls, and stored per-patient data is fetched with `useApi`.
+
+**The patient's target replaces 2,300 everywhere.** `patients.sodium_target_mg`
+is set by the clinician and is the denominator of every percentage the patient
+sees. A heart-failure patient on 1,500 mg shown a bar that fills at 2,300 has
+been shown the wrong bar. FDA and AHA figures survive only as context.
+
+**An unlogged day is not a zero day.** Averages in `backend/app/cohort.py` run
+over logged days, the count of logged days is shown beside them, and today is
+excluded from the trailing window because a half-finished day reads as
+improvement every morning. Do not "simplify" this to a plain 7-day mean.
+
+**One status chip per roster row** (`rosterStatus` in `severity.ts`). The roster
+is the sixteen-chip problem one level up. A label flag outranks a logging lapse
+because it can be true of a patient whose sodium looks perfect.
+
+**No risk score.** The clinician view is arithmetic against a target the
+clinician set. This device measures soup; it does not triage patients.
+
+**Seeded history is tagged in the data, not just in a comment.** Seeded bites
+carry `deviceId = seed-<patient>` and `fw_version = seed-0.1`; seeded manual
+entries and health logs have `source = 'seed'`. `tools/seed_demo.py --reset` removes exactly
+those rows. Today is never seeded for `demo-1`, so the live patient's "today" is
+what the spoon measured.
+
+**Light is the default theme, whatever the OS says.** A clinical white/blue
+palette, applied before first paint by a script in `dashboard/index.html`; the
+masthead toggle switches to dark and persists in `localStorage`. `--accent` is
+the UI blue (buttons, focus, active tab) and is deliberately not
+`--series-salinity` — a button the colour of a series reads as part of the
+chart. The chart colours were re-validated against the white surface.
+
+**Pace is reported, never judged.** NaTrack asks the clinician view for average
+seconds between bites, the quickest bite and a `paceFlag`, so they are there —
+as plain numbers and an uncoloured chip. The earlier decision below still holds
+for everything past that: no threshold on eating speed is ours to claim.
+
+**Upward drift is two weekly means, not a slope.** NaTrack requires the flag and
+does not define it. Rule: last 7 full days at least 15 % above the 7 before, 3+
+logged days in each. It was 10 % for an hour; on the seeded cohort that fired on
+two steady patients by chance.
 
 **Pace is projection, not coaching.** The device LED handles rhythm. The
 dashboard does arithmetic: bites remaining to the daily limit. Deliberately no
@@ -195,6 +263,29 @@ gate used a standard deviation, which is not outlier-robust, so one bubble among
 fifty good samples aborted a bite whose median was exactly right. Now a median
 absolute deviation. If you change the capture logic, run the tests.
 
+**There is no sign-in, and the API trusts the `patientId` it is given.** The
+"Viewing as" dropdown on the Patient tab stands in for a session. PLAN.md §9's
+`can_access(user, patientId)` does not exist yet and must before any of this
+leaves a laptop. Every patient-scoped endpoint goes through `_require_patient`
+in `main.py`, which is where that check belongs.
+
+**One spoon, one holder.** A bite that opens a meal on its own belongs to whoever
+the spoon is paired with (`POST /v1/devices/{id}/pair`), default `demo-1`.
+Starting a meal from the patient portal pairs the spoon to that patient — handing
+someone the spoon and pairing it are the same act. `MealTracker` still tracks one
+spoon; several spoons at once is the next step, not this one.
+
+**An old `spoon.db` will not open.** Columns were renamed and there are no
+migrations, so the backend refuses a database from before the NaTrack rename and
+says so. Delete `backend/spoon.db` and run `tools/seed_demo.py`. Recordings made
+as `bite/v1` cannot be replayed either; none were ever made on real hardware.
+
+**The simulator needed a fix to run on Windows.** `asyncio.sleep(0.02)` rounds
+up to ~31 ms there, so it ran at 32 Hz, captured 16 samples per 500 ms dip, and
+aborted every bite under `MIN_EC_SAMPLES = 20` — silently, because stdout was
+buffered. It now paces against a deadline. If bites ever stop appearing, check
+the sample rate first.
+
 **Recharts is the chart library** and it does not love streaming data — the
 telemetry hook buffers samples and flushes at 200 ms rather than re-rendering per
 sample. Do not remove that.
@@ -219,9 +310,9 @@ at 8 rows.
 | `PLAN.md` | Decision record — why the system is shaped this way |
 | `firmware/spoon/` | ESP32 sketch |
 | `firmware/test/` | Host-side logic tests |
-| `backend/app/` | FastAPI, SQLite |
-| `dashboard/src/` | React + Vite + TS |
-| `tools/` | Simulator and replay |
+| `backend/app/` | FastAPI, SQLite. `cohort.py` is the clinician-view arithmetic |
+| `dashboard/src/` | React + Vite + TS. `views/` holds the three screens |
+| `tools/` | Simulator, replay, and `seed_demo.py` |
 
 One thing to internalise before touching the firmware: **a real scoop is half a
 second long.** Every timing constant follows from that, and it is why EC samples

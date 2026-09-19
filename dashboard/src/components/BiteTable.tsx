@@ -31,7 +31,7 @@ export function BiteTable({ bites }: { bites: Bite[] }) {
               <th>Pace</th>
               <th className="num">Salt</th>
               <th className="num">Temp</th>
-              <th className="num">Vol</th>
+              <th className="num">Weight</th>
               <th className="num">Sodium</th>
               <th className="num">Range</th>
               <th className="num">Samples</th>
@@ -40,13 +40,13 @@ export function BiteTable({ bites }: { bites: Bite[] }) {
           <tbody>
             {shown.map((b) => {
               return (
-                <tr key={`${b.device_id}-${b.bite_id}-${b.ts_utc}`}>
-                  <td className="primary">{shortTime(b.ts_utc)}</td>
+                <tr key={`${b.deviceId}-${b.bite_id}-${b.timestamp}`}>
+                  <td className="primary">{shortTime(b.timestamp)}</td>
                   <td><Chip indicator={sev.pace(b.pace)} /></td>
                   <td className="num">{(b.salinity_g_l / 10).toFixed(2)}%</td>
-                  <td className="num">{b.temp_c.toFixed(0)}°C</td>
-                  <td className="num">{b.volume_ml.toFixed(1)} mL</td>
-                  <td className="num primary">{b.sodium_mg.toFixed(1)} mg</td>
+                  <td className="num">{b.tempC.toFixed(0)}°C</td>
+                  <td className="num">{b.weightGrams.toFixed(1)} g</td>
+                  <td className="num primary">{b.sodiumEstimate.toFixed(1)} mg</td>
                   <td className="num">
                     {b.sodium_mg_low.toFixed(0)}–{b.sodium_mg_high.toFixed(0)}
                   </td>

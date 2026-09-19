@@ -14,7 +14,7 @@ import { markerFor } from '../lib/severity';
 export function SodiumProjection({
   bites, intake,
 }: { bites: Bite[]; intake: IntakeToday | null }) {
-  const p = project(bites, intake?.total_sodium_mg ?? 0);
+  const p = project(bites, intake?.total_sodium_mg ?? 0, intake?.sodiumTarget);
 
   if (!p) {
     return (
@@ -43,25 +43,25 @@ export function SodiumProjection({
 
       <p className="fig-sm">
         {p.overLimit ? 'Over' : p.bitesToLimit ?? '—'}
-        <span>{p.overLimit ? 'daily limit reached' : 'bites to your daily limit'}</span>
+        <span>{p.overLimit ? 'daily target reached' : 'bites to your daily target'}</span>
       </p>
 
       <div className="rule" />
 
       <div className="readouts">
-        <div className="ro">
-          <div className="k">Per bite</div>
-          <div className="v">{p.mgPerBite.toFixed(1)} <small>mg (±25%)</small></div>
+        <div className="readout">
+          <div className="label">Per bite</div>
+          <div className="value">{p.mgPerBite.toFixed(1)} <small>mg (±25%)</small></div>
         </div>
-        <div className="ro">
-          <div className="k">Rate</div>
-          <div className="v">
+        <div className="readout">
+          <div className="label">Rate</div>
+          <div className="value">
             {p.mgPerMinute !== null ? p.mgPerMinute.toFixed(0) : '—'} <small>mg/min</small>
           </div>
         </div>
-        <div className="ro">
-          <div className="k">Time to limit</div>
-          <div className="v">
+        <div className="readout">
+          <div className="label">Time to target</div>
+          <div className="value">
             {p.overLimit ? '—'
               : p.minutesToLimit !== null ? formatMinutes(p.minutesToLimit)
               : '—'}
@@ -78,8 +78,8 @@ export function SodiumProjection({
         <p className="note attention">
           <span className="mk">{marker}</span>
           {p.overLimit
-            ? "Today's intake is past the 2,300 mg limit."
-            : `At this rate today's limit arrives within ${p.bitesToLimit} more bites.`}
+            ? `Today's intake is past the ${(intake?.sodiumTarget ?? 2300).toLocaleString()} mg target.`
+            : `At this rate today's target arrives within ${p.bitesToLimit} more bites.`}
         </p>
       )}
     </section>

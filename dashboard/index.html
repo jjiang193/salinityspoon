@@ -8,6 +8,16 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap">
     <title>Salinity Spoon</title>
+    <script>
+      // Before first paint, or a saved dark theme flashes white on every load.
+      // Light is the default whatever the OS says: see src/styles.css.
+      try {
+        document.documentElement.dataset.theme =
+          localStorage.getItem('theme') === 'dark' ? 'dark' : 'light';
+      } catch (e) {
+        document.documentElement.dataset.theme = 'light';
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>

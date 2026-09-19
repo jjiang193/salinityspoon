@@ -8,13 +8,13 @@ import { clockTime, relativeTick } from '../lib/time';
 function TempTip({ active, payload, label }: any) {
   if (!active || !payload?.length) return null;
   const p: ChartPoint = payload[0].payload;
-  if (p.temp_c === null) return null;
+  if (p.tempC === null) return null;
   return (
     <div className="tip">
       <div className="tip-t">{clockTime(label)}</div>
       <div className="tip-row">
         <span className="swatch" style={{ background: 'var(--series-temp)' }} />
-        {p.temp_c.toFixed(1)} °C
+        {p.tempC.toFixed(1)} °C
       </div>
       <div className="tip-note">
         {p.temp_in_range ? 'within the probe’s range' : 'out of range · no bite can be logged'}
@@ -31,7 +31,7 @@ function TempTip({ active, payload, label }: any) {
  * the probe is out of spec and no bite is recorded at all.
  */
 export function TemperatureChart({ points }: { points: ChartPoint[] }) {
-  const withTemp = points.filter((p) => p.temp_c !== null);
+  const withTemp = points.filter((p) => p.tempC !== null);
   const now = withTemp.length ? withTemp[withTemp.length - 1].t : Date.now();
 
   return (
@@ -72,7 +72,7 @@ export function TemperatureChart({ points }: { points: ChartPoint[] }) {
                        fill: 'var(--limit-line)', fontSize: 10 }}
             />
             <Line
-              type="monotone" dataKey="temp_c" dot={false} isAnimationActive={false}
+              type="monotone" dataKey="tempC" dot={false} isAnimationActive={false}
               stroke="var(--series-temp)" strokeWidth={2}
             />
           </LineChart>
