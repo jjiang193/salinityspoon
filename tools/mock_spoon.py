@@ -135,8 +135,12 @@ class MockSpoon:
             print(f"  ABORT: only {len(self.ec_buffer)} EC samples")
             return None
 
-        sd = statistics.stdev(self.ec_buffer) if len(self.ec_buffer) > 1 else 0.0
-        stability = 1.0 - min(max((sd - 0.05) / 0.45, 0.0), 1.0)
+        # Median absolute deviation, matching firmware/spoon/bite_detector.h.
+        # A standard deviation here would defeat the median below: one bubble
+        # among fifty good samples would abort a bite whose median was right.
+        med = statistics.median(self.ec_buffer)
+        mad = statistics.median([abs(v - med) for v in self.ec_buffer]) * 1.4826
+        stability = 1.0 - min(max((mad - 0.05) / 0.45, 0.0), 1.0)
         quality = round(min(1.0, 0.5 + 0.5 * stability), 3)
         if quality < QUALITY_THRESHOLD:
             print(f"  ABORT: quality {quality:.2f} below threshold")

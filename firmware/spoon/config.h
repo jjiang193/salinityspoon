@@ -56,7 +56,10 @@
 #define MAX_EC_SAMPLES        256
 
 #define EC_SUBMERGED_FLOOR_MS   0.30f   // mS/cm; a probe in air reads ~0
-#define EC_STABILITY_MAX_SD     0.50f   // abort above this
+// Robust spread (MAD x 1.4826), not a standard deviation. A standard deviation
+// is itself not outlier-robust, so a single bubble would blow past any sane
+// threshold and abort a bite the median had already handled correctly.
+#define EC_STABILITY_MAX_SPREAD 0.50f   // mS/cm; abort above this
 #define GYRO_LIFT_THRESHOLD     1.20f   // rad/s, the raise that confirms a bite
 #define GYRO_STILL_THRESHOLD    0.15f
 

@@ -17,3 +17,4 @@ firmware/spoon/secrets.h
 .idea/
 .DS_Store
 backend/recordings/
+firmware/test/test_firmware

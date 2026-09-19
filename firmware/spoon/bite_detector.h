@@ -112,13 +112,13 @@ class BiteDetector {
     if (!salinity::tempInRange(tempC)) return abort("temperature out of probe range");
     if (_count < MIN_EC_SAMPLES)       return abort("too few EC samples");
 
-    float med = median();
-    float sd  = stdDev();
-    if (sd > EC_STABILITY_MAX_SD) return abort("EC unstable");
+    float med    = median();
+    float spread = robustSpread();
+    if (spread > EC_STABILITY_MAX_SPREAD) return abort("EC unstable");
 
     // 0..1 trust score. Stability is the only live term by this point -
     // submersion and settling are already guaranteed by reaching CONFIRM.
-    float stability = 1.0f - constrain((sd - 0.05f) / 0.45f, 0.0f, 1.0f);
+    float stability = 1.0f - constrain((spread - 0.05f) / 0.45f, 0.0f, 1.0f);
     float q = 0.5f + 0.5f * stability;
     if (ECOverRange(med)) q *= 0.3f;
     if (q < QUALITY_THRESHOLD) return abort("quality below threshold");
@@ -133,32 +133,43 @@ class BiteDetector {
 
   static bool ECOverRange(float ec) { return ec >= PROBE_EC_MAX_MS_CM * 0.95f; }
 
-  // Median, not mean: one bubble against the electrode must not move a sodium
-  // figure. Insertion sort on a copy - N is small and bounded.
-  float median() {
-    static float tmp[MAX_EC_SAMPLES];
-    memcpy(tmp, _buf, sizeof(float) * _count);
-    for (int i = 1; i < _count; i++) {
-      float key = tmp[i];
+  // Insertion sort in place - N is small and bounded, so nothing fancier pays.
+  static void sortInPlace(float* a, int n) {
+    for (int i = 1; i < n; i++) {
+      float key = a[i];
       int j = i - 1;
-      while (j >= 0 && tmp[j] > key) { tmp[j + 1] = tmp[j]; j--; }
-      tmp[j + 1] = key;
+      while (j >= 0 && a[j] > key) { a[j + 1] = a[j]; j--; }
+      a[j + 1] = key;
     }
-    return _count ? tmp[_count / 2] : 0.0f;
   }
 
-  float stdDev() const {
-    if (_count < 2) return INFINITY;
-    float mean = 0.0f;
-    for (int i = 0; i < _count; i++) mean += _buf[i];
-    mean /= _count;
-    float ss = 0.0f;
-    for (int i = 0; i < _count; i++) ss += (_buf[i] - mean) * (_buf[i] - mean);
-    return sqrtf(ss / (_count - 1));
+  // Median, not mean: one bubble against the electrode must not move a sodium
+  // figure.
+  float median() {
+    if (!_count) return 0.0f;
+    memcpy(_scratch, _buf, sizeof(float) * _count);
+    sortInPlace(_scratch, _count);
+    return _scratch[_count / 2];
+  }
+
+  // Median absolute deviation, scaled to be comparable with a standard
+  // deviation on normally distributed data.
+  //
+  // A standard deviation would defeat the median sitting right above it: one
+  // bubble among fifty good samples pushes it from ~0 to ~1.5 mS/cm, aborting
+  // a bite whose median was exactly right. MAD ignores that outlier and still
+  // catches a genuinely unstable signal.
+  float robustSpread() {
+    if (_count < 3) return INFINITY;
+    float med = median();
+    for (int i = 0; i < _count; i++) _scratch[i] = fabsf(_buf[i] - med);
+    sortInPlace(_scratch, _count);
+    return _scratch[_count / 2] * 1.4826f;
   }
 
   BiteState _state = BS_IDLE;
   uint32_t  _stateSince = 0;
   float     _buf[MAX_EC_SAMPLES];
+  float     _scratch[MAX_EC_SAMPLES];
   int       _count = 0;
 };
