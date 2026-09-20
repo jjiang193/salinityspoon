@@ -3,6 +3,11 @@
  * Reads every sensor at 50 Hz, detects bites, prints sodium per bite, lights the LED
  * when bites come too fast.
  *
+ * How to use it: scoop -> dip the probe into the spoon for about a second -> lift
+ * the probe out -> eat. The weight is taken before the dip (the probe leans on the
+ * spoon, so the load cell is only honest while it is out) and the bite is closed
+ * when the weight falls away. See BiteDetector.h.
+ *
  * Before running: calibrate EC (ECCalibrate.ino) and the load cell (LoadCellCalibrate.ino).
  * Boot with the spoon empty, level and still. Type z + Enter to re-zero later.
  * Serial Monitor: 115200 baud.
@@ -26,7 +31,7 @@ void setup() {
   unsigned long start = millis();
   while (millis() - start < 700) { sensorsUpdate(); delay(LOOP_MS); }
   biteBegin();
-  Serial.println("Ready. Scoop, pause level for ~0.5 s (most accurate), then eat.");
+  Serial.println("Ready. Scoop, hold level for ~0.5 s, dip the probe in for ~1 s, lift it out, eat.");
 }
 
 void loop() {
@@ -48,10 +53,11 @@ void loop() {
   Bite b;
   if (biteUpdate(r, now, b)) {
     Serial.printf(">>> BITE #%lu: ate %.1f g (%.1f loaded - %.1f left), %.2f mS/cm at %.1f C"
-                  " -> sodium ~%.0f mg (%.0f-%.0f mg)%s%s\n",
+                  " from %d reading(s) -> sodium ~%.0f mg (%.0f-%.0f mg)%s%s%s\n",
                   (unsigned long)b.biteId, b.weightG, b.loadedG, b.leftoverG,
-                  b.salinityMsCm, b.tempC, b.sodiumMg, b.sodiumLowMg, b.sodiumHighMg,
-                  b.heldStill ? "" : " [weighed moving]", b.tempSettled ? "" : " [temp settling]");
+                  b.salinityMsCm, b.tempC, b.dipSamples, b.sodiumMg, b.sodiumLowMg, b.sodiumHighMg,
+                  b.heldStill ? "" : " [weighed moving]", b.tempSettled ? "" : " [temp settling]",
+                  b.salinityCarried ? " [NOT DIPPED: salinity reused from the last dip]" : "");
 
     unsigned long gapMs;
     if (paceOnBite(now, gapMs)) {
