@@ -373,7 +373,7 @@ Resources:
       ProtocolType: HTTP
       CorsConfiguration:
         AllowOrigins: [!Ref DashboardOrigin]
-        AllowMethods: [GET, POST, PUT, OPTIONS]
+        AllowMethods: [GET, POST, PUT, DELETE, OPTIONS]
         AllowHeaders: [authorization, content-type]
         MaxAge: 600
 
@@ -410,8 +410,11 @@ Resources:
             - Effect: Allow
               Action: [dynamodb:PutItem]
               Resource: !GetAtt TelemetryTable.Arn   # device pairing only
+            # DeleteItem is for a self-reported meal the patient takes back,
+            # and for nothing else: bites are never deleted through the API.
             - Effect: Allow
-              Action: [dynamodb:Query, dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem]
+              Action: [dynamodb:Query, dynamodb:GetItem, dynamodb:PutItem,
+                       dynamodb:UpdateItem, dynamodb:DeleteItem]
               Resource: !GetAtt PatientsTable.Arn
 
   QueryLogGroup:
@@ -495,6 +498,96 @@ Resources:
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: "POST /v1/devices/{deviceId}/pair"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${QueryIntegration}"
+
+  GetIntakeTodayRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/intake/today"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${QueryIntegration}"
+
+  GetSpoonRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/spoon"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${QueryIntegration}"
+
+  GetLabelClaimsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/label-claims"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${QueryIntegration}"
+
+  GetMealsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/meals"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${QueryIntegration}"
+
+  GetManualMealsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/manual-meals"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${QueryIntegration}"
+
+  PostManualMealRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/manual-meals"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${QueryIntegration}"
+
+  DeleteManualMealRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "DELETE /api/manual-meals/{entryId}"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${QueryIntegration}"
+
+  PostMealStartRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/meals/start"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${QueryIntegration}"
+
+  PostMealCloseRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/meals/close"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${QueryIntegration}"
+
+  PostMealLabelRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/meals/label"
       AuthorizationType: JWT
       AuthorizerId: !Ref JwtAuthorizer
       Target: !Sub "integrations/${QueryIntegration}"

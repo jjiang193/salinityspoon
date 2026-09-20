@@ -35,7 +35,7 @@ export default function App() {
 
   // Who holds the spoon. Polled: it changes when someone starts a meal, which
   // no single patient's session is entitled to hear about.
-  const spoon = useApi<SpoonStatus>(cloudMode ? null : '/api/spoon', 0, 5000);
+  const spoon = useApi<SpoonStatus>('/api/spoon', 0, 5000);
   const holderId = spoon.data?.patientId ?? null;
   // Any spoon at all, by the server's clock. Null until the server has said:
   // "unknown" must not read as "off". A failed poll keeps the last answer, so
@@ -56,10 +56,7 @@ export default function App() {
   // answered to refuse it - so there as well the polling is the evidence.
   const connected = sessionPatientId !== null && !telemetry.notFound
     ? telemetry.connected
-    // In cloud mode there is no spoon poll to judge by, so the live session is
-    // the only evidence; with none open, say connected rather than claim a
-    // server is down when nothing has been asked of it.
-    : cloudMode ? true : spoon.error === null;
+    : spoon.error === null;
 
   // The Patient tab remembers whose chart you were just reading.
   const portalPatientId = isPatientUser

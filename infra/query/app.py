@@ -10,12 +10,14 @@ see *this patient*.
     to the patient they ask about. Broken access control is the first risk on
     the reference sheet's list, so it is one function, called by every route.
 
-What this is not, yet: meal labels, self-reported food, the recording controls
-and the rest of the local backend's /api surface. Meals are derived here from
-the bites (the contract's 20-minute rule) rather than read from MealSummary
-rows, which phase 5 adds via Streams. The local backend remains the full
-article; this is the cloud subset, and the dashboard shows blanks where the
-cloud has nothing to say rather than pretending.
+Also the /api half the patient portal runs on - today's intake, self-reported
+food, the claim list, who holds the spoon - because a portal that cannot answer
+those is a portal that says the server is unreachable.
+
+What is still local-only: setting a meal's label (the bowl is labelled at the
+table, on the laptop), the recording controls, and the live sample stream.
+Meals are derived here from the bites (the contract's 20-minute rule) rather
+than read from MealSummary rows, which phase 5 adds via Streams.
 """
 
 from __future__ import annotations
@@ -46,6 +48,7 @@ MEAL_GAP_MINUTES = 20          # docs/telemetry-schema.md: meal grouping
 DRIFT_MIN_LOGGED_DAYS = 3
 DRIFT_THRESHOLD = 0.15
 DEFAULT_TARGET_MG = 1500
+DEFAULT_PATIENT = "demo-1"
 TARGET_RANGE = (500, 5000)
 SODIUM_PER_G_NACL = 0.3934
 
@@ -379,6 +382,23 @@ def put_target(claims: dict, pid: str, body: dict) -> Any:
 
 VITALS = {"systolic": (60, 260), "diastolic": (30, 160), "weightKg": (20, 400)}
 
+# backend/app/labels.py - FDA nutrient content claims, 21 CFR 101.61.
+CLAIM_LABEL = {
+    "sodium_free": "Sodium free", "very_low_sodium": "Very low sodium",
+    "low_sodium": "Low sodium", "reduced_sodium": "Reduced sodium", "none": "No claim",
+}
+CLAIM_MAX_SODIUM_MG_PER_SERVING = {"sodium_free": 5.0, "very_low_sodium": 35.0, "low_sodium": 140.0}
+REFERENCE_SERVING_ML = 240.0
+
+# backend/app/salinity.py
+FDA_DAILY_LIMIT_MG = 2300
+AHA_IDEAL_LIMIT_MG = 1500
+MANUAL_MAX_MG = 5000
+# A spoon heard from this recently is on the table. Bites, not samples: raw
+# samples never leave the device on the cloud path, which is the whole point of
+# edge aggregation, so "silent" here means no bite rather than no sample.
+SPOON_RECENT_S = 900
+
 
 def post_health_log(claims: dict, pid: str, body: dict) -> Any:
     require_access(claims, pid)
@@ -425,6 +445,170 @@ def pair_device(claims: dict, device_id: str, body: dict) -> Any:
     return {"deviceId": device_id, "patientId": pid}
 
 
+# ------------------------------------------------- /api, for the portal ----
+
+def today_bounds(tz_offset_min: int) -> str:
+    """Midnight in the viewer's day, as a UTC timestamp."""
+    now = datetime.now(timezone.utc)
+    local_midnight = (now + timedelta(minutes=tz_offset_min)).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    return (local_midnight - timedelta(minutes=tz_offset_min)).isoformat().replace("+00:00", "Z")
+
+
+def get_intake_today(claims: dict, qs: dict) -> Any:
+    pid = qs.get("patientId", DEFAULT_PATIENT)
+    patient = require_access(claims, pid)
+    tz = int(qs.get("tz_offset_min", 0))
+    bites = bites_between(pid, today_bounds(tz), None)
+    manual = manual_meals(pid, since=today_bounds(tz))
+
+    measured = round(sum(float(b.get("sodiumEstimate") or 0) for b in bites), 1)
+    low = round(sum(float(b.get("sodium_mg_low") or 0) for b in bites), 1)
+    high = round(sum(float(b.get("sodium_mg_high") or 0) for b in bites), 1)
+    manual_mg = round(sum(float(m["sodium_mg"]) for m in manual), 1)
+    total = round(measured + manual_mg, 1)
+    target = patient["sodiumTarget"]
+
+    # Fractions of a daily limit, not medical advice. Same wording as the
+    # local backend's, because the same person reads both.
+    pct_fda = total / FDA_DAILY_LIMIT_MG * 100.0
+    verdict = ("low" if pct_fda < 25 else "moderate" if pct_fda < 50
+               else "high" if pct_fda < 85 else "very high")
+
+    return {
+        "patientId": pid,
+        "measured_sodium_mg": measured,
+        "measured_sodium_mg_low": low, "measured_sodium_mg_high": high,
+        "manual_sodium_mg": manual_mg,
+        "total_sodium_mg": total,
+        "total_sodium_mg_low": round(low + manual_mg, 1),
+        "total_sodium_mg_high": round(high + manual_mg, 1),
+        "bite_count": len(bites), "manual_count": len(manual),
+        "meal_count": len(meals_from(bites)),
+        "sodiumTarget": target,
+        "pct_of_target": round(total / target * 100.0, 1),
+        "fda_daily_limit_mg": FDA_DAILY_LIMIT_MG,
+        "aha_ideal_limit_mg": AHA_IDEAL_LIMIT_MG,
+        "pct_of_fda_limit": round(pct_fda, 1),
+        "pct_of_aha_ideal": round(total / AHA_IDEAL_LIMIT_MG * 100.0, 1),
+        "verdict": verdict,
+    }
+
+
+def get_spoon(claims: dict, qs: dict) -> Any:
+    """Who holds the spoon, from the pairing, and how long since it spoke.
+
+    The local backend answers this from the sample stream. There is no sample
+    stream in the cloud - only fused bites leave the device - so `sample_age_s`
+    is the age of the last bite. It is the same question, answered with the
+    only evidence the cloud has, and the field keeps its name so the dashboard
+    does not need two of them.
+    """
+    pid = qs.get("patientId") or DEFAULT_PATIENT
+    require_access(claims, pid)
+    bites = bites_between(pid, (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(), None)
+    age = None
+    if bites:
+        last = datetime.fromisoformat(bites[-1]["timestamp"].replace("Z", "+00:00"))
+        age = round((datetime.now(timezone.utc) - last).total_seconds(), 1)
+    return {
+        "patientId": pid,
+        "deviceId": bites[-1].get("deviceId") if bites else None,
+        "mealId": None,
+        "spoon_seen": bool(bites),
+        "sample_age_s": age,
+        "busy": False,
+        "holder": True,
+        "product_name": None, "label_claim": "none", "label_check": None,
+    }
+
+
+def get_label_claims(_claims: dict) -> Any:
+    return {
+        "claims": [{"value": k, "label": v,
+                    "max_sodium_mg_per_serving": CLAIM_MAX_SODIUM_MG_PER_SERVING.get(k)}
+                   for k, v in CLAIM_LABEL.items()],
+        "reference_serving_ml": REFERENCE_SERVING_ML,
+    }
+
+
+def manual_meals(pid: str, since: Optional[str] = None, limit: int = 100) -> list[dict[str, Any]]:
+    lo = f"MANUAL#{since}" if since else "MANUAL#"
+    rows = PATIENTS.query(
+        KeyConditionExpression=Key("PK").eq(f"PATIENT#{pid}") & Key("SK").between(lo, "MANUAL#\uffff"),
+        ScanIndexForward=False, Limit=limit,
+    ).get("Items", [])
+    return [{k: num(v) for k, v in r.items() if k not in ("PK", "SK")} for r in rows]
+
+
+def get_manual_meals(claims: dict, qs: dict) -> Any:
+    pid = qs.get("patientId", DEFAULT_PATIENT)
+    require_access(claims, pid)
+    return manual_meals(pid, limit=int(qs.get("limit", 25)))
+
+
+def post_manual_meal(claims: dict, body: dict) -> Any:
+    """Log something the spoon cannot read.
+
+    The probe only reads liquids, so without this a daily total is blind to
+    bread, crackers, cheese and most of what actually carries dietary sodium.
+    Stored apart from measured bites and always labelled self-reported.
+    """
+    pid = body.get("patientId", DEFAULT_PATIENT)
+    require_access(claims, pid)
+    name = str(body.get("name", "")).strip()
+    if not name:
+        raise HttpError(400, "name is required")
+    try:
+        mg = float(body["sodium_mg"])
+    except (KeyError, TypeError, ValueError):
+        raise HttpError(400, "sodium_mg is required")
+    if mg < 0:
+        raise HttpError(400, "sodium_mg cannot be negative")
+    if mg > MANUAL_MAX_MG:
+        raise HttpError(400, f"Sodium for one item must be {MANUAL_MAX_MG:,} mg or less. Check the label.")
+
+    ts = body.get("ts_utc") or datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    item = {
+        "PK": f"PATIENT#{pid}", "SK": f"MANUAL#{ts}",
+        "id": ts,                     # the timestamp is the id: Undo restores it unchanged
+        "patientId": pid, "name": name, "sodium_mg": Decimal(str(mg)),
+        "portion": body.get("portion"), "ts_utc": ts,
+        "source": body.get("source") if body.get("ts_utc") else "manual",
+    }
+    PATIENTS.put_item(Item={k: v for k, v in item.items() if v is not None})
+    return {k: num(v) for k, v in item.items() if k not in ("PK", "SK") and v is not None}
+
+
+def delete_manual_meal(claims: dict, entry_id: str, qs: dict) -> Any:
+    pid = qs.get("patientId", DEFAULT_PATIENT)
+    require_access(claims, pid)
+    got = PATIENTS.delete_item(
+        Key={"PK": f"PATIENT#{pid}", "SK": f"MANUAL#{entry_id}"},
+        ReturnValues="ALL_OLD",
+    ).get("Attributes")
+    if not got:
+        raise HttpError(404, "entry not found")
+    return {"deleted": entry_id}
+
+
+def get_meals(claims: dict, qs: dict) -> Any:
+    pid = qs.get("patientId", DEFAULT_PATIENT)
+    require_access(claims, pid)
+    since = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    return meals_from(bites_between(pid, since, None))[:int(qs.get("limit", 25))]
+
+
+def local_only(what: str) -> Any:
+    """Some things only the laptop at the table can do.
+
+    A bowl is labelled where the bowl is, and a recording is started where the
+    spoon is. Saying so in a sentence the portal can show beats a 404 that
+    reads as a broken server.
+    """
+    raise HttpError(409, f"{what} happens on the spoon's own backend, not in the cloud build")
+
+
 # --------------------------------------------------------------- handler ----
 
 def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
@@ -453,6 +637,26 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
             return reply(200, get_health_log(claims, path["patientId"]))
         if route == "POST /v1/devices/{deviceId}/pair":
             return reply(200, pair_device(claims, path["deviceId"], body))
+
+        # --- /api: what NaTrack does not name, and the portal needs ---
+        if route == "GET /api/intake/today":
+            return reply(200, get_intake_today(claims, qs))
+        if route == "GET /api/spoon":
+            return reply(200, get_spoon(claims, qs))
+        if route == "GET /api/label-claims":
+            return reply(200, get_label_claims(claims))
+        if route == "GET /api/meals":
+            return reply(200, get_meals(claims, qs))
+        if route == "GET /api/manual-meals":
+            return reply(200, get_manual_meals(claims, qs))
+        if route == "POST /api/manual-meals":
+            return reply(200, post_manual_meal(claims, body))
+        if route == "DELETE /api/manual-meals/{entryId}":
+            return reply(200, delete_manual_meal(claims, path["entryId"], qs))
+        if route in ("POST /api/meals/start", "POST /api/meals/close"):
+            return local_only("Starting and closing a meal")
+        if route == "POST /api/meals/label":
+            return local_only("Labelling a bowl")
         return reply(404, {"detail": "no such endpoint"})
     except HttpError as e:
         return reply(e.status, {"detail": e.detail})
