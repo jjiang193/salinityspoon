@@ -47,6 +47,8 @@ PROBE_TEMP_MAX_C = 40.0
 PROBE_EC_MAX_MS_CM = 20.0  # hard detection ceiling
 MAX_WEIGHT_G = 100.0  # load cell's range
 CLOCK_SKEW = timedelta(days=1)
+# docs/telemetry-schema.md: a meal is a run of bites with no gap longer than this.
+MEAL_GAP_MINUTES = 20
 
 REQUIRED_NUMBERS = (
     "salinityIndex",
@@ -172,6 +174,54 @@ def store(payload: dict[str, Any], patient_id: str) -> tuple[bool, dict[str, Any
         raise
 
 
+def meal_totals(patient_id: str, upto: dict[str, Any]) -> dict[str, Any]:
+    """The open meal's running totals, for the card that reads "this meal".
+
+    Derived here rather than stored, for the same reason query/app.py derives
+    meals: MealSummary rows are phase 5's job. One query per bite, over the
+    last hour, which at one bite every few seconds is nothing.
+    """
+    since = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    try:
+        items = TABLE.query(
+            KeyConditionExpression=Key("PK").eq(f"PATIENT#{patient_id}")
+            & Key("SK").between(f"BITE#{since}", "BITE#\uffff"),
+        ).get("Items", [])
+    except ClientError:
+        log.exception("could not read the open meal's bites")
+        return {}
+
+    # Walk back from the newest bite while the gaps stay inside the meal rule.
+    run: list[dict[str, Any]] = []
+    prev: Optional[datetime] = None
+    for it in reversed(items):
+        when = datetime.fromisoformat(str(it["timestamp"]).replace("Z", "+00:00"))
+        if prev is not None and prev - when > timedelta(minutes=MEAL_GAP_MINUTES):
+            break
+        run.append(it)
+        prev = when
+    run.reverse()
+    if not run:
+        run = [upto]
+
+    def f(item: dict[str, Any], key: str) -> float:
+        v = item.get(key)
+        return float(v) if v is not None else 0.0
+
+    gaps = [f(b, "biteIntervalSec") for b in run[1:] if b.get("biteIntervalSec") is not None]
+    fast = sum(1 for b in run if "fast" in (b.get("flags") or []))
+    return {
+        "biteCount": len(run),
+        "totalSodium": round(sum(f(b, "sodiumEstimate") for b in run), 1),
+        "total_sodium_mg_low": round(sum(f(b, "sodium_mg_low") for b in run), 1),
+        "total_sodium_mg_high": round(sum(f(b, "sodium_mg_high") for b in run), 1),
+        "total_weight_g": round(sum(f(b, "weightGrams") for b in run), 1),
+        "avgBiteIntervalSec": round(sum(gaps) / len(gaps), 1) if gaps else None,
+        "minBiteIntervalSec": round(min(gaps), 1) if gaps else None,
+        "paceFlag": fast > len(run) / 2,
+    }
+
+
 def push_live(payload: dict[str, Any], patient_id: str) -> int:
     """Send the stored bite to every socket watching this patient.
 
@@ -192,11 +242,17 @@ def push_live(payload: dict[str, Any], patient_id: str) -> int:
         log.exception("could not list live sessions for this patient")
         return 0
 
+    totals = meal_totals(patient_id, payload)
     message = json.dumps({
         "type": "bite",
         "patientId": patient_id,
         "received_at": payload["receivedAt"],
         "data": {k: v for k, v in payload.items() if k not in ("PK", "SK", "expiresAt")},
+        "meal_totals": totals,
+        # The meal has no id in the cloud until MealSummary rows exist; its
+        # first bite's timestamp identifies it, as it does in query/app.py.
+        "mealId": None,
+        "label_check": None,      # a bowl is labelled at the table, not here
     }, default=str).encode()
 
     sent = 0

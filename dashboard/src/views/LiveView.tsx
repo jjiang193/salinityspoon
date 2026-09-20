@@ -4,6 +4,7 @@ import { useApi } from '../hooks/useApi';
 import { href } from '../lib/route';
 import { MealHero } from '../components/MealHero';
 import { SensorStatus } from '../components/SensorStatus';
+import { LastBitePanel } from '../components/LastBitePanel';
 import { SalinityChart } from '../components/SalinityChart';
 import { TemperatureChart } from '../components/TemperatureChart';
 import { BiteTable } from '../components/BiteTable';
@@ -12,6 +13,7 @@ import { SodiumProjection } from '../components/SodiumProjection';
 import { LabelCheckCard } from '../components/LabelCheckCard';
 import { InterlockBanner } from '../components/InterlockBanner';
 import { SpoonSilentBanner } from '../components/SpoonSilentBanner';
+import { cloudMode } from '../lib/cloud';
 
 /**
  * NaTrack's third view: the live session, which is also the demo.
@@ -82,6 +84,9 @@ export function LiveView({ patientId, telemetry: t, spoonError }: {
                   mealName={t.mealLabel?.product_name ?? null}
                   volumeSource={t.bites[0]?.volume_source}
                   spoonSeen={t.spoonLive} />
+        {cloudMode ? (
+          <LastBitePanel bites={t.bites} />
+        ) : (
         <SensorStatus
           connected={t.connected}
           spoonLive={t.spoonLive}
@@ -95,6 +100,7 @@ export function LiveView({ patientId, telemetry: t, spoonError }: {
           lastDip={silentMidMeal || !t.connected ? null : t.lastDip}
           dipsNotCounted={t.dipsNotCounted}
         />
+        )}
       </div>
 
       <div className="grid two" style={{ marginTop: 16 }}>
@@ -109,12 +115,20 @@ export function LiveView({ patientId, telemetry: t, spoonError }: {
         <LabelCheckCard check={t.labelCheck} />
       </div>
 
-      <details className="card diag" style={{ marginTop: 16 }} open>
+      <details className="card diag" style={{ marginTop: 16 }} open={!cloudMode}>
         <summary>Signal diagnostics — sample-level traces</summary>
-        <div className="grid two">
-          <SalinityChart points={t.points} />
-          <TemperatureChart points={t.points} />
-        </div>
+        {cloudMode ? (
+          <p className="muted">
+            Sample traces stay on the spoon's own backend. Only fused bites are sent
+            to the cloud — 70 readings a second become one bite event, which is what
+            makes the system affordable at scale.
+          </p>
+        ) : (
+          <div className="grid two">
+            <SalinityChart points={t.points} />
+            <TemperatureChart points={t.points} />
+          </div>
+        )}
       </details>
     </>
   );
