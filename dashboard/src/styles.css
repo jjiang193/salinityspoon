@@ -767,3 +767,15 @@ th.num + th.num, td.num + td.num { padding-left: 12px; }
 .signin-card button:disabled { opacity: 0.55; cursor: default; }
 .signin-error { margin: 4px 0 0; color: var(--severity-critical, #b42318); font-size: 0.875rem; }
 .signin-note { margin: 14px 0 0; color: var(--text-muted); font-size: 0.75rem; text-align: center; }
+
+/* A button that reads as part of the sentence it sits in. */
+.linklike {
+  margin-left: 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+}

@@ -10,7 +10,7 @@ import { Chip } from './components/Chip';
 import { ThemeToggle } from './components/ThemeToggle';
 import * as sev from './lib/severity';
 import { PROBE_TEMP_MAX_C, SpoonStatus } from './types';
-import { cloudMode, onAuthChange, signedIn } from './lib/cloud';
+import { cloudMode, onAuthChange, ownPatientId, role, signOut, signedIn, signedInAs } from './lib/cloud';
 import { SignIn } from './components/SignIn';
 
 /** A spoon that last sent a sample longer ago than this is not switched on. */
@@ -35,7 +35,7 @@ export default function App() {
 
   // Who holds the spoon. Polled: it changes when someone starts a meal, which
   // no single patient's session is entitled to hear about.
-  const spoon = useApi<SpoonStatus>('/api/spoon', 0, 5000);
+  const spoon = useApi<SpoonStatus>(cloudMode ? null : '/api/spoon', 0, 5000);
   const holderId = spoon.data?.patientId ?? null;
   // Any spoon at all, by the server's clock. Null until the server has said:
   // "unknown" must not read as "off". A failed poll keeps the last answer, so
@@ -45,6 +45,8 @@ export default function App() {
     : null;
 
   const gated = cloudMode && !authed;
+  const who = cloudMode ? role() : null;
+  const isPatientUser = who === 'patient';
 
   const sessionPatientId = route.view === 'live' ? holderId : route.patientId;
   const telemetry = useTelemetry(sessionPatientId);
@@ -54,11 +56,15 @@ export default function App() {
   // answered to refuse it - so there as well the polling is the evidence.
   const connected = sessionPatientId !== null && !telemetry.notFound
     ? telemetry.connected
-    : spoon.error === null;
+    // In cloud mode there is no spoon poll to judge by, so the live session is
+    // the only evidence; with none open, say connected rather than claim a
+    // server is down when nothing has been asked of it.
+    : cloudMode ? true : spoon.error === null;
 
   // The Patient tab remembers whose chart you were just reading.
-  const portalPatientId =
-    (route.view !== 'live' && route.patientId) || holderId || DEFAULT_PATIENT_ID;
+  const portalPatientId = isPatientUser
+    ? (ownPatientId() ?? DEFAULT_PATIENT_ID)
+    : (route.view !== 'live' && route.patientId) || holderId || DEFAULT_PATIENT_ID;
 
   if (gated) return <SignIn />;
 
@@ -87,10 +93,12 @@ export default function App() {
       </header>
 
       <nav className="tabs" aria-label="Views">
-        <a href={href({ view: 'clinician', patientId: null })}
-           aria-current={route.view === 'clinician' ? 'page' : undefined}>
-          Clinician
-        </a>
+        {!isPatientUser && (
+          <a href={href({ view: 'clinician', patientId: null })}
+             aria-current={route.view === 'clinician' ? 'page' : undefined}>
+            Clinician
+          </a>
+        )}
         <a href={href({ view: 'patient', patientId: portalPatientId, tab: 'today' })}
            aria-current={route.view === 'patient' ? 'page' : undefined}>
           Patient portal
@@ -99,10 +107,20 @@ export default function App() {
            aria-current={route.view === 'live' ? 'page' : undefined}>
           Live
         </a>
-        <span className="tabs-note">Demo build · synthetic patients · no sign-in</span>
+        {cloudMode ? (
+          <span className="tabs-note">
+            Synthetic patients · signed in as {signedInAs() ?? who}
+            <button type="button" className="linklike" onClick={signOut}>Sign out</button>
+          </span>
+        ) : (
+          <span className="tabs-note">Demo build · synthetic patients · no sign-in</span>
+        )}
       </nav>
 
-      {route.view === 'live' ? (
+      {isPatientUser && route.view === 'clinician' ? (
+        <PatientView patientId={portalPatientId} tab="today" telemetry={telemetry}
+                     spoonOnline={spoonOnline} />
+      ) : route.view === 'live' ? (
         <LiveView patientId={holderId} telemetry={telemetry} spoonError={spoon.error} />
       ) : route.view === 'patient' ? (
         <PatientView patientId={route.patientId} tab={route.tab} telemetry={telemetry}

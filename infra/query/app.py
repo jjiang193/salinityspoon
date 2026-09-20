@@ -44,6 +44,7 @@ RANGE_DAYS = {"day": 1, "week": WINDOW_DAYS + 1, "month": 30}
 ROSTER_DAYS = 14
 MEAL_GAP_MINUTES = 20          # docs/telemetry-schema.md: meal grouping
 DRIFT_MIN_LOGGED_DAYS = 3
+DRIFT_THRESHOLD = 0.15
 DEFAULT_TARGET_MG = 1500
 TARGET_RANGE = (500, 5000)
 SODIUM_PER_G_NACL = 0.3934
@@ -116,7 +117,8 @@ def require_patient(patient_id: str) -> dict[str, Any]:
         "age": num(item.get("age")),
         "condition": item.get("condition"),
         "sodiumTarget": num(item.get("sodiumTarget"), DEFAULT_TARGET_MG),
-        "clinicianId": item.get("clinicianId"),
+        "clinicianId": item.get("clinicianId", ""),
+        "enrolled_at": item.get("enrolled_at", ""),
     }
 
 
@@ -183,7 +185,8 @@ def daily_totals(bites: list[dict], days: int, tz_offset_min: int) -> list[dict[
         out.append({
             "date": d,
             "logged": bool(row),
-            "biteCount": int(row["n"]) if row else 0,
+            "bite_count": int(row["n"]) if row else 0,
+            "manual_count": 0,
             "measured_sodium_mg": round(row["mg"], 1) if row else 0.0,
             "measured_sodium_mg_low": round(row["low"], 1) if row else 0.0,
             "measured_sodium_mg_high": round(row["high"], 1) if row else 0.0,
@@ -271,20 +274,25 @@ def summarise(patient: dict, bites: list[dict], tz_offset_min: int, history_days
     gaps = [m["avgBiteIntervalSec"] for m in meals if m["avgBiteIntervalSec"] is not None]
     quickest = [m["minBiteIntervalSec"] for m in meals if m["minBiteIntervalSec"] is not None]
 
+    target = patient["sodiumTarget"]
+    today = all_days[-1]
     return {
-        "patientId": patient["patientId"], "name": patient["name"],
-        "age": patient["age"], "condition": patient["condition"],
-        "sodiumTarget": patient["sodiumTarget"],
-        "today": all_days[-1],
+        **patient,
+        "today": today,
         "daily": all_days[-history_days:],
+        "pct_of_target_today": round(today["total_sodium_mg"] / target * 100.0, 1),
+        "pct_of_target_avg": round(avg / target * 100.0, 1) if avg is not None else None,
         "avg_sodium_mg": avg, "days_logged": logged, "window_days": WINDOW_DAYS,
-        "days_over_target": sum(1 for d in window if d["logged"] and d["total_sodium_mg"] > patient["sodiumTarget"]),
+        "days_over_target": sum(1 for d in window if d["logged"] and d["total_sodium_mg"] > target),
         "drift_pct": drift,
+        "upward_drift": drift is not None and drift >= DRIFT_THRESHOLD * 100.0,
         "days_since_log": days_since_log,
         "avgBiteIntervalSec": round(sum(gaps) / len(gaps), 1) if gaps else None,
         "minBiteIntervalSec": round(min(quickest), 1) if quickest else None,
-        "paceFlagged": sum(1 for m in meals if m["paceFlag"]),
+        "pace_flagged_meals": sum(1 for m in meals if m["paceFlag"]),
+        # No label is ever set through the cloud, so no meal can contradict one.
         "flagged_meals": 0,
+        "last_activity_at": bites[-1]["timestamp"] if bites else None,
         "in_meal": False,
         "meals": meals,
     }

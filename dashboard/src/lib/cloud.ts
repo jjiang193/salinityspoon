@@ -20,8 +20,79 @@ const REGION = import.meta.env.VITE_COGNITO_REGION ?? 'us-east-1';
 /** True when this build reads from AWS and therefore needs a sign-in. */
 export const cloudMode = Boolean(API_BASE && CLIENT_ID);
 
+/**
+ * The token survives a reload for SESSION_MINUTES, in sessionStorage - which is
+ * per tab and dies with it. Not localStorage: that outlives the tab, syncs
+ * across windows, and is the thing the security notes say to keep PHI-adjacent
+ * material out of. The short life is the point: a clinician's laptop left open
+ * on a ward asks again rather than staying signed in all afternoon.
+ */
+const SESSION_MINUTES = 5;
+const STORE_KEY = 'natrack.session';
+
 let idToken: string | null = null;
 const listeners = new Set<(signedIn: boolean) => void>();
+
+function remember(token: string): void {
+  try {
+    sessionStorage.setItem(STORE_KEY, JSON.stringify({
+      token, expiresAt: Date.now() + SESSION_MINUTES * 60_000,
+    }));
+  } catch {
+    // Private browsing, or storage turned off. The session then lasts exactly
+    // as long as the page does, which is a worse experience and not a bug.
+  }
+}
+
+function restore(): string | null {
+  try {
+    const raw = sessionStorage.getItem(STORE_KEY);
+    if (!raw) return null;
+    const { token, expiresAt } = JSON.parse(raw);
+    if (typeof token !== 'string' || typeof expiresAt !== 'number' || Date.now() > expiresAt) {
+      sessionStorage.removeItem(STORE_KEY);
+      return null;
+    }
+    return token;
+  } catch {
+    return null;
+  }
+}
+
+idToken = restore();
+
+/** What the token says about the signed-in person. Read, never trusted: the
+ *  API checks all of this again, and it is only used to decide what to show. */
+function claims(): Record<string, unknown> {
+  if (!idToken) return {};
+  try {
+    const part = idToken.split('.')[1];
+    return JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/')));
+  } catch {
+    return {};
+  }
+}
+
+export type Role = 'clinician' | 'patient' | null;
+
+export function role(): Role {
+  const groups = claims()['cognito:groups'];
+  const list = Array.isArray(groups) ? groups : [];
+  if (list.includes('clinician')) return 'clinician';
+  if (list.includes('patient')) return 'patient';
+  return null;
+}
+
+/** A patient's own id, from their token. The API takes it from there too. */
+export function ownPatientId(): string | null {
+  const id = claims()['custom:patientId'];
+  return typeof id === 'string' ? id : null;
+}
+
+export function signedInAs(): string | null {
+  const email = claims().email;
+  return typeof email === 'string' ? email : null;
+}
 
 export function signedIn(): boolean {
   return !cloudMode || idToken !== null;
@@ -81,10 +152,12 @@ export async function signIn(email: string, password: string): Promise<void> {
   const token = body?.AuthenticationResult?.IdToken;
   if (!token) throw new Error('Sign-in needs another step that this page cannot do yet.');
   idToken = token;
+  remember(token);
   announce();
 }
 
 export function signOut(): void {
   idToken = null;
+  try { sessionStorage.removeItem(STORE_KEY); } catch { /* see remember() */ }
   announce();
 }
