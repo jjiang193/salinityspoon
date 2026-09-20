@@ -21,3 +21,4 @@ firmware/test/test_firmware
 
 # Load-cell firmware simulation binary
 firmware/loadcell/test/bite_sim
+firmware/loadcell/test/bite_sim.exe
