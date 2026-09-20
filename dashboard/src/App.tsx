@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { useTelemetry } from './hooks/useTelemetry';
 import { useApi } from './hooks/useApi';
 import { DEFAULT_PATIENT_ID, href, useRoute } from './lib/route';
@@ -9,6 +10,8 @@ import { Chip } from './components/Chip';
 import { ThemeToggle } from './components/ThemeToggle';
 import * as sev from './lib/severity';
 import { PROBE_TEMP_MAX_C, SpoonStatus } from './types';
+import { cloudMode, onAuthChange, signedIn } from './lib/cloud';
+import { SignIn } from './components/SignIn';
 
 /** A spoon that last sent a sample longer ago than this is not switched on. */
 const SPOON_ONLINE_S = 10;
@@ -23,6 +26,11 @@ const SPOON_ONLINE_S = 10;
  * shows every patient and so has no session; it polls.
  */
 export default function App() {
+  // A cloud build has to know who is asking before it asks anything. A local
+  // build is already signed in by not having accounts at all.
+  const [authed, setAuthed] = useState(signedIn());
+  useEffect(() => onAuthChange(setAuthed), []);
+
   const route = useRoute();
 
   // Who holds the spoon. Polled: it changes when someone starts a meal, which
@@ -35,6 +43,8 @@ export default function App() {
   const spoonOnline = spoon.data && spoon.error === null
     ? spoon.data.sample_age_s !== null && spoon.data.sample_age_s < SPOON_ONLINE_S
     : null;
+
+  const gated = cloudMode && !authed;
 
   const sessionPatientId = route.view === 'live' ? holderId : route.patientId;
   const telemetry = useTelemetry(sessionPatientId);
@@ -49,6 +59,8 @@ export default function App() {
   // The Patient tab remembers whose chart you were just reading.
   const portalPatientId =
     (route.view !== 'live' && route.patientId) || holderId || DEFAULT_PATIENT_ID;
+
+  if (gated) return <SignIn />;
 
   return (
     <div className="app">

@@ -4,6 +4,7 @@ import {
   QUALITY_THRESHOLD, Sample,
 } from '../types';
 import { getJson } from '../lib/api';
+import { sessionUrl } from '../lib/cloud';
 
 /** ~2 minutes of history at the 10 Hz publish rate. */
 const MAX_POINTS = 1200;
@@ -215,8 +216,7 @@ export function useTelemetry(patientId: string | null): TelemetryState {
 
     const connect = () => {
       attempts += 1;
-      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      ws = new WebSocket(`${proto}://${location.host}/session/${patientId}`);
+      ws = new WebSocket(sessionUrl(patientId));
 
       ws.onopen = () => {
         firstSample = true;

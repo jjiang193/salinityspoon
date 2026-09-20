@@ -722,3 +722,48 @@ th.num + th.num, td.num + td.num { padding-left: 12px; }
   background: linear-gradient(90deg, var(--series-salinity) 50%, var(--series-manual) 50%);
   opacity: var(--today-opacity);
 }
+
+/* --- Sign-in (cloud builds only) ------------------------------------------
+   A local build never renders this: the demo laptop has no accounts. */
+.signin {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 24px 16px;
+}
+.signin-card {
+  width: min(360px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 28px 24px 24px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
+}
+.signin-card h1 { margin: 0; font-size: 1.5rem; letter-spacing: -0.01em; }
+.signin-sub { margin: 0 0 12px; color: var(--muted); font-size: 0.875rem; }
+.signin-card label { font-size: 0.8125rem; color: var(--muted); }
+.signin-card input {
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: inherit;
+  font: inherit;
+}
+.signin-card input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.signin-card button {
+  margin-top: 12px;
+  padding: 10px 14px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--accent-ink, #fff);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.signin-card button:disabled { opacity: 0.55; cursor: default; }
+.signin-error { margin: 4px 0 0; color: var(--bad, #b42318); font-size: 0.875rem; }
+.signin-note { margin: 14px 0 0; color: var(--muted); font-size: 0.75rem; text-align: center; }

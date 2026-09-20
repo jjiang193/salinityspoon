@@ -1,4 +1,4 @@
-# NaTrack on AWS — phases 1–3: ingest, live session, and the API
+# NaTrack on AWS — phases 1–4: ingest, live session, API, dashboard
 
 What `docs/natrack-system-design.pdf` calls ingest, as far as the durable write:
 
@@ -21,7 +21,13 @@ browser ──Cognito id token──► HTTP API ──► query Lambda ──�
           GET /v1/patients, /v1/patients/{id}/summary, …
 ```
 
-Later phases (not here): the dashboard's own hosting, then hardening (KMS CMK, private subnets, Streams → `MealSummary`, S3
+…and the dashboard itself, on S3 behind CloudFront:
+
+```
+https://<distribution>.cloudfront.net   the React app, signed in through Cognito
+```
+
+Later phases (not here): hardening (KMS CMK, private subnets, Streams → `MealSummary`, S3
 archive, CloudTrail).
 
 The message is `bite/v2`, defined in `docs/telemetry-schema.md`. That file is
@@ -37,6 +43,7 @@ maps the firmware's struct onto it.
 | `session/app.py` | The live session's connection book: who is watching which patient |
 | `query/app.py` | NaTrack's `/v1` endpoints, and the per-patient access check |
 | `scripts/seed-cloud.py` | The demo patient, the clinician assignment and two Cognito users |
+| `scripts/deploy-dashboard.sh` | Builds the dashboard against this stack and ships it to CloudFront |
 | `scripts/watch-session.py` | Watches a patient's session from the terminal, as the dashboard will |
 | `test_validate.py` | The refusal rules, no AWS needed: `python3 infra/test_validate.py` |
 | `sample-bite.json` | The load-cell spoon's bite, from the handoff doc |
@@ -162,6 +169,38 @@ labels and the label check, self-reported food, the recording controls, and the
 rest of the local backend's `/api` surface. The local backend is still the full
 article.
 
+## The dashboard
+
+```bash
+infra/scripts/deploy-dashboard.sh
+```
+
+The API URL, the socket URL and the Cognito client id come from the stack's
+outputs, so there is nothing to paste and nothing to drift.
+
+**One codebase, two deployments.** With none of the `VITE_*` variables set, the
+dashboard is origin-relative and talks to the local backend through Vite's
+proxy, with no sign-in at all — that is still the demo path, and it did not
+change. Given them, the same build talks to AWS and every request carries a
+Cognito id token.
+
+**The token is held in memory only.** It is not PHI, but it opens PHI, and the
+reference sheet's rule for that family is no `localStorage`. A reload asks
+again, which is the right trade for a laptop on a ward.
+
+**The bucket is private.** CloudFront reaches it through an origin access
+control; there is no public bucket to leave open, which is the last item on the
+reference sheet's watch list. Deep links work because 403 and 404 both return
+`index.html` — with OAC, S3 says "forbidden" for a key that is not there rather
+than admitting it does not exist.
+
+**CORS is locked to the distribution.** `DashboardOrigin` defaults to `*` for
+local development and is set to the CloudFront domain on deploy; a preflight
+from any other origin gets no `access-control-allow-origin` back at all.
+
+`index.html` is uploaded with `no-cache` and the hashed assets with a year, so a
+browser can never hold last week's app against this week's API.
+
 ## Decisions worth knowing
 
 **Two tables.** The design PDF keeps patient medical data apart from telemetry,
@@ -225,7 +264,7 @@ Lambda, IoT Core. A `natrack-monthly` budget alerts at $20.
   the stack without hardware.
 - The device certificate is created by `scripts/create-device-cert.sh`, not by
   the stack. Keys stay in `~/natrack-certs/`, never in git.
-- `MealSummary` rows, the REST API and Cognito are phases 3–5. The local backend
+- `MealSummary` rows and the hardening pass are phase 5. The local backend
   keeps serving the demo meanwhile, exactly as `HANDOFF.md` intends.
 - The live session is unauthenticated, and `meal_totals` / `label_check` are not
   in the pushed message: the cloud has no meal grouping until `MealSummary`
