@@ -37,54 +37,94 @@ MPU6050, Adafruit ADS1X15, HX711 (Bogdan Necula).
 
 ## How a bite is decided
 
-The probe is a **separate instrument dipped into the spoon**, not a sensor riding
-in the bowl. That gives four steps, and each one is a state in
-`SalinityTest/BiteDetector.h`, which has the rules and every threshold at the top.
+The probe is a **separate instrument dipped into the bowl**, not a sensor riding
+in it. Five states, one per physical step, all of them in
+`SalinityTest/BiteDetector.h` with every threshold at the top.
 
-1. **Scoop** (`EMPTY → LOADED`). Weight ≥ 4 g. The probe is out, so the load cell
-   reads food and nothing else — **this is the only moment the scoop weight can
-   be trusted**, so it is measured and latched here: the mean of 0.5 s held level
-   and still, tilt-corrected up to 20°, or the instantaneous weight if the user
-   never pauses (flagged, wider range).
-2. **Dip** (`LOADED → DIPPING`). EC above 250 mV means the probe is in the food.
-   It leans on the spoon, so **the weight is frozen for the whole dip** and
-   nothing it does means anything.
-3. **Measure** (`DIPPING → MEASURED`). EC below 150 mV for 0.3 s means the probe
-   is out. Salinity is the **median of the last 2 s** of the dip, not its mean:
-   the probe arrives from room air and the EC reading is compensated with a
+Three latches shape the whole thing: the weight is latched once it has been
+there long enough to be real, the salinity is latched when the dip ends, and the
+bite is only logged once the bowl has stayed empty long enough to be sure.
+
+1. **Fill** (`EMPTY → FILLING`). Weight ≥ 4 g starts a 3 s timer
+   (`LOAD_SETTLE_MS`). Nothing is believed while food is still going in: pouring
+   takes a moment and the load cell's rolling average is chasing it.
+2. **Latch** (`FILLING → LOADED`). The scoop weight is the mean of the last
+   0.5 s, tilt-corrected up to 20°. Nothing after this changes it — not the
+   probes leaning on the bowl, not a knock. More food (> 2 g for 0.5 s) re-latches
+   deliberately.
+3. **Dip** (`LOADED → DIPPING`). EC above `WET_MV` means the probes are in the
+   food. They lean on the bowl, so **the weight is frozen for the whole dip**.
+4. **Measure** (`DIPPING → MEASURED`). EC below `DRY_MV` for 0.3 s means they are
+   out. Salinity is the **median of the last 2 s** of the dip, not its mean: the
+   probe arrives from room air and the EC reading is compensated with a
    temperature that is still climbing, so early samples describe a food that does
-   not exist. A dip shorter than 5 readings (0.5 s) is discarded.
-4. **Eat** (`MEASURED → EMPTY`). Weight below 30 % of the latched scoop for 0.3 s
-   → **bite**, eaten = loaded − leftover.
+   not exist. Shorter than 5 readings (0.5 s) is discarded. **The measurement is
+   latched**: lifting the probes out cannot change it, only a new dip can.
+5. **Pour** (`MEASURED → EMPTY`). Weight below 30 % of the latched scoop for a
+   full **2 s**, *and* the bowl tipped past **45°** while it emptied → **bite**,
+   eaten = loaded − leftover.
 
-**The interlock.** A dip whose median temperature falls outside the probe's rated
-**0–40 °C** is dropped, and the spoonful is not recorded at all — not even with
-the previous dip's salinity, because carrying a number onto food we know is out
-of range is the log-it-anyway path wearing a different hat. Same numbers as
-`firmware/spoon/config.h` and `backend/app/salinity.py`, for the same reason:
-outside that range the temperature compensation was never characterised, so a
-reading there is not less precise, it is unsupported.
+**Both halves of that last rule matter.** The 2 s is why emptying in stages is
+one bite rather than three. The tilt is why lifting a coin off a level bowl is
+not a bite at all: weight leaving is not the same event as food being poured out,
+and without the tilt the two are indistinguishable. The angle that confirmed the
+bite travels with it, as `pour_tilt_deg`, so a suspicious bite can be checked
+against how firmly it was actually poured. With no MPU-6050 there is no evidence
+either way and the weight drop is taken at face value (`REQUIRE_POUR 0` restores
+that behaviour deliberately).
 
-**A falling weight ends the bite. Full stop.** There is no pour detection, no
-abort, no "was the probe still in liquid" — tipping a measured spoonful back into
-the bowl is recorded as a bite. That is the accepted cost of a rule a user can
-predict, and the simulation asserts it so it cannot quietly come back.
+Tilt is measured **against the orientation learned at boot or at `z`**, not
+against true vertical, so a bowl that rests at an angle is still "level" — but it
+has to be zeroed in the pose it will sit in.
 
-Two things the flow has to handle because the probe is separate:
+**Wet/dry thresholds are per probe.** This one reads **3 mV dry, 9–17 mV just
+after lifting out of 13 mS/cm brine, and 150–1735 mV in food**, so `WET_MV` is
+120 and `DRY_MV` is 80. The previous 250/150 pair never triggered on it: the dip
+was invisible and every bite was silently discarded. Measure yours with the debug
+line (it prints `EC ### mV WET/dry`) before trusting any of this.
 
-- **Eaten without a dip.** The salinity of the last dip is reused (same bowl,
-  same soup), the bite is flagged `salinityCarried` and its range widens by 25 %.
-  With no earlier dip the spoonful is not recorded, and says so on Serial.
-- **Topping up.** Weight rising more than 2 g above a measured scoop sends it
-  back to `LOADED` — the new food needs its own dip.
+**No false-bite logic.** No "was the probe still in liquid", no abort. Tipping a
+measured spoonful back into the bowl is recorded as a bite, and the simulation
+asserts it so the guesswork cannot quietly come back.
 
-Motion is now an instrument, not a judge: tilt correction and a "weighed while
-moving" flag. A missing MPU-6050 lowers quality instead of blocking bites.
-Estimating up/down by integrating the accelerometer was tried and rejected: with
-this MPU's per-axis error (reads 10.88 at rest) plus hand tremor it drifted by
-metres in simulation.
+- **Emptied without a dip.** The bite is logged with salinity 0 and marked
+  `[NOT DIPPED]` on Serial. It is **not** sent to the cloud: every field in
+  `bite/v2` is a measurement, and there is no way to say "no salinity" in it.
+- **The interlock.** A dip whose median temperature falls outside the probe's
+  rated **0–40 °C** is dropped and the spoonful is not recorded at all. Same
+  numbers as `firmware/spoon/config.h` and `backend/app/salinity.py`, for the
+  same reason: outside that range the compensation was never characterised, so a
+  reading there is not less precise, it is unsupported.
+
+**Sodium** uses the team's quadratic EC→NaCl curve (`SalinityTest/Salinity.h`,
+mirroring `backend/app/salinity.py`), not the old flat ×0.55 factor. The backend
+recomputes sodium from the raw fields, so the two have to agree.
 
 **Pace:** two bites < 6 s apart → LED on for 5 s.
+
+## Sending bites to AWS
+
+`SalinityTest/Net.cpp`: Wi-Fi, NTP, and MQTT over TLS to AWS IoT Core, publishing
+one `bite/v2` per bite to `devices/<id>/bites`. Nothing else leaves the device —
+no raw samples, no motion data, no patient identity; the cloud adds the patient
+from the device's pairing. The stack it lands in is `infra/` (IoT rule → SQS →
+`ingestBite` → DynamoDB).
+
+Everything is non-blocking: the loop keeps running at 50 Hz whether the network
+is up, down or mid-handshake. Bites queue in RAM (24 of them) while offline and
+drain when the link returns; the queue is lost on reboot. `millis()` is stamped
+through the NTP offset at send time, so bites queued before the clock was right
+still get correct ISO-8601 UTC timestamps.
+
+Credentials live in `SalinityTest/secrets.h`, which is gitignored. Copy
+`secrets.h.example`, then fill in Wi-Fi and paste the three PEMs from
+`infra/scripts/create-device-cert.sh`. **The device private key identifies this
+spoon to AWS: never commit it, and deactivate the certificate in IoT Core if it
+leaks.**
+
+Verified end to end on 2026-09-20: a real bite (31.2 g, 13.04 mS/cm at 21.9 °C,
+125 EC readings) published from the board and landed in DynamoDB as
+`BITE#2026-09-20T07:33:07.494Z#spoon-01#2`, 21 s later.
 
 ## How long does the dip have to be?
 
@@ -102,39 +142,42 @@ these numbers.**
 400 randomized sessions never used for tuning (random speeds, heights, tilts,
 pauses, dip lengths, probe pressure, tremor, MPU errors). `cd test && make run`
 
-Hold-out seeds (`SEEDBASE=90000`), so none of these sessions were used for tuning.
-The previous design's table described a spoon-mounted probe and does not carry
-over; it has been removed rather than left to be misread.
+Hold-out seeds (`SEEDBASE=90000`), so none of these sessions were used for
+tuning. Two things in the harness changed with this firmware, and both are
+corrections rather than conveniences:
+
+- The simulated probe used to read **120 mV forever** after touching food. The
+  real probe falls to 9 mV within one reading and settles at 3–4. Against the
+  old model the detector never saw the probe leave and no bite ever completed.
+- Actions hold still for ~3 s after the scoop and stay open ~3 s after the pour,
+  because the weight now latches after 3 s and the bite confirms 2 s after the
+  food goes. Without that the confirm lands in the next action's window.
 
 | Action | Correct |
 |---|---|
-| Scoop, dip ~1 s, eat | 97% |
-| Scoop, dip 6–12 s, eat | 97% |
-| Scoop and eat, never dipped | 91% |
-| Dip too briefly to count, eat | 97% |
+| Scoop, dip ~1 s, eat | 100% |
+| Scoop, dip 6–12 s, eat | 100% |
+| Scoop and eat, never dipped | 100% |
+| Dip too briefly to count, eat | 100% |
 | Dip, look again, dip, eat | 100% |
-| Dip, add more food, dip again, eat | 99% |
-| Dip, then tip it back in the bowl | 96% |
-| Dip, eat half, lower, eat the rest | 91% |
-| Knock the table with a dipped spoonful, then eat | 97% |
-| **Real bites missed** | **8 / 1623** |
+| Dip, add more food, dip again, eat | 100% |
+| Dip, then tip it back in the bowl | 100% |
+| Dip, eat half, lower, eat the rest | 95% |
+| Knock the table with a dipped spoonful, then eat | 100% |
+| **Real bites missed** | **0 / 1618** |
 
 And what the design costs, as numbers rather than caveats:
 
 | | |
 |---|---|
-| Eaten grams error (median / 95th pct) | 3% / 66% |
-| **Grams counted beyond what was eaten** | **11.2%** — re-scooping a measured spoonful is a falling weight, so it closes a bite and the re-scoop opens another. The 95th-pct grams error above is mostly this. |
-| Salinity error, all bites (median / 95th pct) | 5.3% / 20.8% |
-| **Salinity error, temperature settled** (median / 95th pct) | **1.3% / 5.1%** — what a dip long enough to stop the probe climbing buys |
-| Bites whose salinity came from an earlier dip | 15% |
-| Bites weighed while moving | 30% |
+| Eaten grams error (median / 95th pct) | 1% / 7% |
+| **Grams counted beyond what was eaten** | **1.1%** — was 11.2% before the pour requirement: re-scooping a measured spoonful no longer closes a bite unless the bowl was tipped. |
+| Salinity error, all bites (median / 95th pct) | 8.8% / 100% |
+| **Salinity error, temperature settled** (median / 95th pct) | **1.2% / 4.3%** — what a dip long enough to stop the probe climbing buys |
+| Bites whose salinity was never measured (no dip) | 20% |
 
-The 8 missed bites are cold, dilute food: EC scales with temperature, so near
-5 °C a weak broth can sit under `WET_MV` and the dip is never noticed at all.
-`WET_MV` cannot simply be lowered — `DRY_MV` has to clear the conductive film the
-probe keeps after a dip, and `WET_MV` has to clear `DRY_MV`. Measure that film on
-the real probe (step 5 below) and set all three together.
+The 100% tail on "all bites" is the never-dipped bites, which carry salinity 0 by
+design and are not sent to the cloud.
 
 ### The interlock, and the hole in it
 
@@ -142,7 +185,7 @@ the real probe (step 5 below) and set all three together.
 
 | Dip length | Dropped | Slipped through |
 |---|---|---|
-| 0.8–1.5 s | 98 / 400 | **302 (76%)** |
+| 0.8–1.5 s | 56 / 400 | **344 (86%)** |
 | 6–12 s | 400 / 400 | 0 |
 
 A short dip does not defeat the interlock by being wrong — it defeats it by being
