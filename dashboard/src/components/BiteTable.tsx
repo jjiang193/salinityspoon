@@ -1,4 +1,5 @@
 import { Bite } from '../types';
+import { fmtMg, fmtSaltPct } from '../lib/sodium';
 import { shortTime } from '../lib/time';
 import * as sev from '../lib/severity';
 import { Chip } from './Chip';
@@ -42,13 +43,18 @@ export function BiteTable({ bites }: { bites: Bite[] }) {
               return (
                 <tr key={`${b.deviceId}-${b.bite_id}-${b.timestamp}`}>
                   <td className="primary">{shortTime(b.timestamp)}</td>
-                  <td><Chip indicator={sev.pace(b.pace)} /></td>
-                  <td className="num">{(b.salinity_g_l / 10).toFixed(2)}%</td>
+                  {/* A meal's first bite has no pace: a dash, not a chip around one. */}
+                  <td>
+                    {sev.pace(b.pace).label === '—'
+                      ? <span className="muted">—</span>
+                      : <Chip indicator={sev.pace(b.pace)} />}
+                  </td>
+                  <td className="num">{fmtSaltPct(b.salinity_g_l)}</td>
                   <td className="num">{b.tempC.toFixed(0)}°C</td>
                   <td className="num">{b.weightGrams.toFixed(1)} g</td>
-                  <td className="num primary">{b.sodiumEstimate.toFixed(1)} mg</td>
+                  <td className="num primary">{fmtMg(b.sodiumEstimate)} mg</td>
                   <td className="num">
-                    {b.sodium_mg_low.toFixed(0)}–{b.sodium_mg_high.toFixed(0)}
+                    {fmtMg(b.sodium_mg_low)}–{fmtMg(b.sodium_mg_high)}
                   </td>
                   <td className="num">{b.ec_sample_count}</td>
                 </tr>

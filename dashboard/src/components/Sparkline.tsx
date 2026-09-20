@@ -1,5 +1,7 @@
 import { DailyTotal } from '../types';
+import { fmtMg } from '../lib/sodium';
 import { shortDay } from '../lib/time';
+import { TODAY_OPACITY } from './DailyTrendChart';
 
 const W = 126;
 const H = 28;
@@ -14,6 +16,9 @@ const GAP = 2;
  *
  * An unlogged day is a tick on the baseline, not a missing bar - a gap reads as
  * "zero", and zero is exactly what it is not.
+ *
+ * The last bar is today and is drawn fainter: an unfinished day is always low,
+ * and at full strength every row would end in what looks like improvement.
  */
 export function Sparkline({ daily, targetMg }: { daily: DailyTotal[]; targetMg: number }) {
   const max = Math.max(targetMg * 1.15, ...daily.map((d) => d.total_sodium_mg));
@@ -29,18 +34,19 @@ export function Sparkline({ daily, targetMg }: { daily: DailyTotal[]; targetMg: 
     <svg className="spark" width={W} height={H} viewBox={`0 0 ${W} ${H}`}
          role="img" aria-label={summary}>
       {daily.map((d, i) => {
+        const today = i === daily.length - 1;
         const x = i * slot + GAP / 2;
         const w = slot - GAP;
         return d.logged ? (
           <rect key={d.date} x={x} width={w} rx={1.5}
                 y={y(d.total_sodium_mg)} height={Math.max(1, H - y(d.total_sodium_mg))}
-                fill="var(--series-salinity)">
-            <title>{`${shortDay(d.date)} · ${Math.round(d.total_sodium_mg).toLocaleString()} mg`}</title>
+                fill="var(--series-salinity)" style={today ? { opacity: TODAY_OPACITY } : undefined}>
+            <title>{`${shortDay(d.date)} · ${fmtMg(d.total_sodium_mg)} mg${today ? ' · today so far' : ''}`}</title>
           </rect>
         ) : (
           <rect key={d.date} x={x + w / 2 - 1} width={2} y={H - 3} height={3}
                 fill="var(--axis)">
-            <title>{`${shortDay(d.date)} · nothing logged`}</title>
+            <title>{`${shortDay(d.date)} · nothing logged${today ? ' · today so far' : ''}`}</title>
           </rect>
         );
       })}

@@ -12,7 +12,9 @@ proof last.
 - [ ] Scoop volume calibrated for whoever is holding the spoon
 - [ ] **A recording captured and replay tested** — `tools/replay.py`
 - [ ] Two cups prepared (see the taste test below)
-- [ ] Dashboard on the big screen, browser zoomed so it reads from 2 m
+- [ ] Dashboard on the big screen, browser zoomed so it reads from 2 m. Sections
+      1–2 run on the **Live** tab, 3–4 on the **Patient portal**, the close on
+      **Clinician**
 - [ ] Backend on `0.0.0.0`, spoon and laptop on the same network
 - [ ] Probe rinsed in **distilled water only**
 
@@ -44,7 +46,8 @@ Then the line that makes it matter:
 
 ## 2. What it does (20 s)
 
-Dip the spoon. A bite appears on the dashboard.
+Dip the spoon. On the **Live** tab a bite appears; on the Patient portal the
+line under the meal says the dip counted.
 
 > "Conductivity, temperature and motion. The accelerometer isn't decoration —
 > it decides which readings are allowed to count. A probe waved through air
@@ -53,16 +56,20 @@ Dip the spoon. A bite appears on the dashboard.
 > scoop, and throw away the first 150 milliseconds because the probe lies while
 > it's wetting."
 
-Point at `Recent bites` → the **Samples** column.
+Point at `Recent bites` (Live tab) → the **Samples** column.
 
 > "Every bite shows how many samples it was built from. You can see which ones
 > to trust."
 
 ## 3. The differentiator (20 s) — the strongest 20 seconds you have
 
-Set the label claim to **Low sodium**. Dip into the salty broth.
+On the Patient portal, in `Start a meal`, set **Sodium claim on the label** to
+**Low sodium** — the one place the label is declared. Dip into the salty broth.
 
-The card flags: *Possible potassium-based salt substitute.*
+The alert at the top of the portal flags: *Possible potassium-based salt
+substitute*, with "What this means" underneath. It judges the bowl's mean so
+far, not one spoonful, so it does not flicker. The same flag is the clinician's
+`Label flag` chip on the roster and the meals table.
 
 > "Conductivity can't tell sodium from potassium. Normally that's a limitation.
 > But salt substitutes *are* potassium chloride — so a product labelled
@@ -79,7 +86,10 @@ credible.
 
 ## 4. Honesty (15 s) — do not skip this
 
-Point at the range under the headline number.
+Point at the range under the headline number — `Left today` on the portal,
+`Sodium this meal` on Live. Hover a day on the clinician's chart: days carry a
+range too, and today's bar is faded and labelled "today so far" because it is
+not in the averages.
 
 > "We never show a bare number. Per bite we're about ±27%; per meal about ±10%,
 > because random scoop variation cancels across thirty bites. The sensor
@@ -92,16 +102,36 @@ Then, if there is hot liquid to hand, dip into it:
 > number would be unsupported rather than just imprecise. We'd rather show
 > nothing than show something we can't defend."
 
+The portal shows a red **Too hot to measure** banner ("Nothing is being counted.
+Let it cool below 40 °C, then dip again"); Live says the same as *Liquid is
+outside the probe's range*. Without hot liquid: `mock_spoon.py --temp 55`.
+
+If there is time, kill the simulator (or switch the spoon off) mid-meal: within
+a few seconds the portal says **Spoon silent for …** in a banner at the top, in
+the same red, instead of showing the last reading as if it were live; Live dashes
+out its sensor values and pauses the projection. Stop the backend instead and
+the pages say *Can't reach the server* — never that the spoon is at fault.
+
+> "A frozen number looks exactly like a working one. So the page says when the
+> spoon has stopped talking."
+
 Point at `Log solid food`.
 
 > "It reads liquids only, so solids are entered by hand and labelled
-> self-reported. Today that's 1,040 mg self-reported against 870 mg measured —
-> we'd be blind to more than half the day if we pretended otherwise."
+> self-reported. The clinician's `Where the sodium comes from` table shows the
+> split — for this patient about a quarter of logged sodium never touched the
+> spoon. We'd be blind to it if we pretended otherwise."
 
 ## 5. Close (10 s)
 
+On **Clinician**, open Maria Okafor. One hover reads a day down through sodium,
+blood pressure and weight.
+
 > "Passive per-bite sodium tracking, with a pace cue on the device and a trend
-> a clinician can act on. It's monitoring and trends — not diagnosis."
+> a clinician can act on — beside the blood pressure and weight the patient
+> logged, as entered. We draw them on the same days. We don't interpret them,
+> and we don't claim one caused the other. It's monitoring and trends — not
+> diagnosis."
 
 ---
 

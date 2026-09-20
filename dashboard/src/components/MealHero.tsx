@@ -1,12 +1,20 @@
-import { MealTotals } from '../types';
-import * as sev from '../lib/severity';
-import { Chip, Fact } from './Chip';
+import { Bite, MealTotals } from '../types';
+import { fmtMg, portionNote } from '../lib/sodium';
+import { Fact } from './Chip';
 
 interface Props {
   totals: MealTotals | null;
   activeMealId: number | null;
-  /** The patient's daily target, set by their care team. */
-  targetMg: number;
+  /** The patient's daily target, set by their care team. Null until it has
+   *  loaded: there is no stand-in, so nothing is measured against one. */
+  targetMg: number | null;
+  /** What the patient said is in the bowl, if they said. */
+  mealName: string | null;
+  /** Where the bites' portions came from; decides what the range line claims. */
+  volumeSource: Bite['volume_source'] | undefined;
+  /** Samples are arriving. The Sensor card beside this one says when they are
+   *  not, and this card's invitation to dip must not contradict it. */
+  spoonSeen: boolean;
 }
 
 /**
@@ -16,45 +24,52 @@ interface Props {
  * The range is shown, always. Scoop volume is estimated, not weighed, and a
  * point estimate with no error bar would overclaim what this hardware can do.
  */
-export function MealHero({ totals, activeMealId, targetMg }: Props) {
+export function MealHero({ totals, activeMealId, targetMg, mealName, volumeSource, spoonSeen }: Props) {
   const live = activeMealId !== null;
   const sodium = totals?.totalSodium ?? 0;
   const low = totals?.total_sodium_mg_low ?? 0;
   const high = totals?.total_sodium_mg_high ?? 0;
   const bites = totals?.biteCount ?? 0;
+  const biteCount = `${bites} bite${bites === 1 ? '' : 's'}`;
 
-  const pctOfLimit = (sodium / targetMg) * 100;
+  const pctOfLimit = targetMg !== null && targetMg > 0 ? (sodium / targetMg) * 100 : null;
 
   return (
     <section className="card">
-      <h2>Sodium this meal</h2>
+      <h2>{!live && bites > 0 ? 'Last meal' : 'Sodium this meal'}</h2>
       <p className="cap">
-        {live ? `Meal #${activeMealId} in progress` : 'No meal in progress'}
-        {bites > 0 && ` · ${bites} bite${bites === 1 ? '' : 's'}`}
+        {live
+          ? `${mealName ?? 'Meal'} in progress${bites > 0 ? ` · ${biteCount}` : ''}`
+          : bites > 0 ? `Ended · ${biteCount}` : 'No meal in progress'}
       </p>
 
       <p className="hero-value">
-        {bites > 0 ? Math.round(sodium).toLocaleString() : '—'}
+        {bites > 0 ? fmtMg(sodium) : '—'}
         <span className="unit">mg</span>
       </p>
 
       {bites > 0 && (
         <p className="hero-range">
-          Range <strong>{Math.round(low).toLocaleString()}–{Math.round(high).toLocaleString()} mg</strong>
-          {' '}· the portion is a calibrated scoop, not weighed
+          Range <strong>{fmtMg(low)}–{fmtMg(high)} mg</strong>
+          {' '}· {portionNote(volumeSource)}
         </p>
       )}
 
-      <div className="pill-row" style={{ marginTop: 14 }}>
-        <Chip indicator={sev.mealVerdict(pctOfLimit)} />
-        <Fact>{pctOfLimit.toFixed(0)}% of the {targetMg.toLocaleString()} mg daily target</Fact>
-      </div>
+      {/* The share of the limit is a fact, and stays one. A "low sodium" verdict
+          chip sat here once - beside a bowl flagged for breaching its "low
+          sodium" label. No bites, or no target yet: nothing to take a share of. */}
+      {bites > 0 && pctOfLimit !== null && targetMg !== null && (
+        <div className="pill-row" style={{ marginTop: 14 }}>
+          <Fact>{pctOfLimit.toFixed(0)}% of the {fmtMg(targetMg)} mg daily limit</Fact>
+        </div>
+      )}
 
       <p className="hero-sub">
         {bites > 0
           ? <>Measured as <strong style={{ color: 'var(--text-primary)' }}>NaCl-equivalent salinity</strong>.
               Conductivity reads all ions, not sodium alone.</>
-          : 'Dip the spoon to log a bite. The liquid must be between 0 and 40 °C.'}
+          : `${spoonSeen ? 'Dip the spoon' : 'Switch the spoon on, then dip'} to log a bite. `
+            + 'The liquid must be between 0 and 40 °C.'}
       </p>
     </section>
   );

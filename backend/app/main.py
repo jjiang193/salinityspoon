@@ -11,7 +11,9 @@ Two route families, and the split is the contract (docs/telemetry-schema.md):
     /api/...  and  /ws/ingest             everything NaTrack does not cover
 """
 
+import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -40,9 +42,32 @@ meals = MealTracker(hub)
 recorder = Recorder()
 
 
+# How often an open meal is checked for having gone idle. The promise on the
+# patient's screen is "ends by itself after 20 minutes"; half a minute late is
+# within it.
+IDLE_CHECK_S = 30.0
+
+
+async def _close_idle_meals() -> None:
+    while True:
+        await asyncio.sleep(IDLE_CHECK_S)
+        try:
+            await meals.close_if_idle()
+        except Exception:
+            # One failed check must not end the checking.
+            pass
+
+
 @app.on_event("startup")
-def _startup() -> None:
+async def _startup() -> None:
     store.init_db()
+    # Held on app.state: a task nothing references can be garbage-collected.
+    app.state.idle_closer = asyncio.create_task(_close_idle_meals())
+
+
+@app.on_event("shutdown")
+async def _shutdown() -> None:
+    app.state.idle_closer.cancel()
 
 
 # --- Ingest ------------------------------------------------------------------
@@ -120,9 +145,6 @@ async def _handle_bite(payload: dict) -> None:
 
     totals = store.recompute_meal(meal_id)
 
-    product_name, claim = store.get_meal_label(meal_id)
-    check = labels.check(bite.salinity_g_l, claim)
-
     message = {
         "type": "bite",
         "received_at": utcnow_iso(),
@@ -130,10 +152,8 @@ async def _handle_bite(payload: dict) -> None:
         "patientId": meals.patient_id,
         "data": payload,
         "meal_totals": totals,
-        "label_check": {
-            "product_name": product_name,
-            **check.__dict__,
-        },
+        # The meal's mean against its label, not this one bite's.
+        "label_check": cohort.live_label_check(meal_id),
     }
     hub.last_bite = message
     await hub.send(meals.patient_id, message)
@@ -154,9 +174,17 @@ async def ws_session(ws: WebSocket, patient_id: str) -> None:
         # Prime a freshly-opened tab so it is not staring at an empty chart -
         # but only with this patient's own data.
         if patient_id == meals.patient_id:
-            for primer in (hub.last_bite, hub.last_sample):
-                if primer and primer["patientId"] == patient_id:
-                    await ws.send_text(json.dumps(primer))
+            bite = hub.last_bite
+            # The last bite is replayed only into the meal it belongs to, and
+            # with the label check as it stands now: the one it carries was
+            # frozen when it landed, and the label may have been declared since.
+            if bite and bite["patientId"] == patient_id and bite["mealId"] == meals.meal_id:
+                await ws.send_text(json.dumps({
+                    **bite, "label_check": cohort.live_label_check(meals.meal_id),
+                }))
+            sample = hub.last_sample
+            if sample and sample["patientId"] == patient_id:
+                await ws.send_text(json.dumps(sample))
         while True:
             await ws.receive_text()  # keepalive / future client commands
     except WebSocketDisconnect:
@@ -183,12 +211,25 @@ def _in_meal(patient_id: str) -> bool:
 
 
 def _with_label_check(meal: dict) -> dict:
+    """A stored meal plus what the bowl was and how it sat against its label.
+
+    The salinity and per-serving figure are there for every weighed meal,
+    declared or not: "which foods" is a question about the bowl, and most
+    bowls carry no claim. The label_* keys are None / 'none' without a claim.
+    """
     check = cohort.label_check(meal)
+    g_l = cohort.meal_salinity_g_l(meal)
     return {
         **meal,
+        "mean_salinity_g_l": g_l,
+        "mg_per_serving": salinity.sodium_mg(g_l, labels.REFERENCE_SERVING_ML)
+        if g_l is not None else None,
         "label_claim_label": labels.CLAIM_LABEL.get(meal["label_claim"]),
         "label_flagged": bool(check and check.flagged),
+        "label_severity": check.severity if check else "none",
+        "label_ratio": check.ratio if check else None,
         "label_headline": check.headline if check else None,
+        "label_detail": check.detail if check else None,
     }
 
 
@@ -215,14 +256,20 @@ def patient_summary(
     """Precomputed trend, sodium and pace. `range` sets the length of `daily`;
     the averages always cover the last seven full days."""
     patient = _require_patient(patient_id)
+    summary = cohort.summarise(
+        patient, tz_offset_min, in_meal=_in_meal(patient_id),
+        history_days=cohort.RANGE_DAYS[range],
+    )
     return {
-        **cohort.summarise(
-            patient, tz_offset_min, in_meal=_in_meal(patient_id),
-            history_days=cohort.RANGE_DAYS[range],
-        ),
+        **summary,
         "range": range,
         "meals": [_with_label_check(m) for m in store.list_meals(60, patient_id)],
         "manual_meals": store.list_manual_meals(40, patient_id),
+        # Summed server-side over the whole range: the two lists above are
+        # capped, so a client adding them up would undercount a month.
+        "sources": cohort.sources(
+            patient_id, cohort.RANGE_DAYS[range], tz_offset_min, summary["daily"]
+        ),
     }
 
 
@@ -267,6 +314,9 @@ class HealthLogEntry(BaseModel):
 # Reject implausible entries (PLAN.md §7). A systolic of 400 is a typo, and a
 # typo stored in a medical record misleads whoever reads it next.
 HEALTH_RANGES = {"systolic": (60, 260), "diastolic": (30, 160), "weightKg": (20, 350)}
+
+# One self-reported item, mg. 99999 is a typo, and it turns a roster row critical.
+MANUAL_MAX_MG = 5000
 
 
 @app.post("/v1/patients/{patient_id}/health-log")
@@ -335,17 +385,29 @@ def spoon() -> dict:
 
     Not called /api/session: in NaTrack a session is the live WebSocket, and
     one word for two things is how this contract got into trouble.
+
+    `sample_age_s` is how long the spoon has been silent. /api/health's
+    spoon_seen latches for the life of the process; a spoon that was switched
+    off an hour ago is not a connected one. The age is computed here so a
+    client's clock cannot be wrong about it.
     """
+    sample_age_s: Optional[float] = None
+    if hub.last_sample is not None:
+        heard = datetime.fromisoformat(hub.last_sample["received_at"])
+        sample_age_s = max(0.0, (datetime.now(timezone.utc) - heard).total_seconds())
     return {
         "patientId": meals.patient_id,
         "mealId": meals.meal_id,
         "deviceId": meals.device_id,
+        "spoon_seen": hub.last_sample is not None,
+        "sample_age_s": sample_age_s,
     }
 
 
 # --- Meals -------------------------------------------------------------------
 @app.get("/api/meals")
 def list_meals(limit: int = 25, patientId: str = store.DEFAULT_PATIENT_ID) -> list[dict]:
+    _require_patient(patientId)
     return store.list_meals(limit, patientId)
 
 
@@ -379,11 +441,25 @@ async def start_meal(req: MealStart) -> dict:
     product = (req.product_name or "").strip() or None
     if product or req.label_claim != "none":
         store.set_meal_label(meal_id, product, req.label_claim)
+        # meals.start announced the meal before it had a label.
+        await meals.announce()
     return {"mealId": meal_id, "patientId": req.patientId}
 
 
+class MealClose(BaseModel):
+    patientId: str
+
+
+def _require_holder(patient_id: str) -> None:
+    """An open meal is its holder's to label or end, and nobody else's."""
+    _require_patient(patient_id)
+    if meals.meal_id is not None and meals.patient_id != patient_id:
+        raise HTTPException(409, "the spoon is in another patient's meal")
+
+
 @app.post("/api/meals/close")
-async def close_meal() -> dict:
+async def close_meal(req: MealClose) -> dict:
+    _require_holder(req.patientId)
     closed = await meals.force_close()
     return {"mealId": closed}
 
@@ -431,12 +507,13 @@ def intake_today(
 
 # --- Label claims ------------------------------------------------------------
 class MealLabel(BaseModel):
+    patientId: str
     product_name: Optional[str] = None
     label_claim: str = "none"
 
 
 @app.post("/api/meals/label")
-def set_meal_label(label: MealLabel) -> dict:
+async def set_meal_label(label: MealLabel) -> dict:
     """Declare what is being measured, so its claim can be checked.
 
     This is what makes the potassium flag possible: the sensor supplies the
@@ -450,12 +527,17 @@ def set_meal_label(label: MealLabel) -> dict:
         raise HTTPException(
             400, f"unknown claim; expected one of {list(labels.CLAIM_LABEL)}"
         )
+    _require_holder(label.patientId)
     if meals.meal_id is None:
         raise HTTPException(409, "no meal in progress — log a bite first")
-    store.set_meal_label(meals.meal_id, label.product_name, label.label_claim)
+    # Stripped as /api/meals/start strips it: a trailing space is not a product.
+    product = (label.product_name or "").strip() or None
+    store.set_meal_label(meals.meal_id, product, label.label_claim)
+    # The session learns the label, and its check, now and not at the next bite.
+    await meals.announce()
     return {
         "mealId": meals.meal_id,
-        "product_name": label.product_name,
+        "product_name": product,
         "label_claim": label.label_claim,
     }
 
@@ -496,6 +578,13 @@ class ManualMeal(BaseModel):
     sodium_mg: float
     portion: Optional[str] = None
     patientId: str = store.DEFAULT_PATIENT_ID
+    # When it was eaten, if not now. Exists for Undo: an entry deleted by
+    # mistake and restored keeps its original time, and so its original day.
+    ts_utc: Optional[str] = None
+    # Exists for Undo as well, and is honoured only beside ts_utc: a seeded
+    # entry removed and restored stays tagged, so `seed_demo.py --reset` still
+    # removes exactly the seeded rows.
+    source: Literal["manual", "seed"] = "manual"
 
 
 @app.post("/api/manual-meals")
@@ -508,11 +597,29 @@ def add_manual_meal(entry: ManualMeal) -> dict:
     """
     if entry.sodium_mg < 0:
         raise HTTPException(400, "sodium_mg cannot be negative")
+    if entry.sodium_mg > MANUAL_MAX_MG:
+        raise HTTPException(
+            400, f"Sodium for one item must be {MANUAL_MAX_MG:,} mg or less. Check the label."
+        )
     if not entry.name.strip():
         raise HTTPException(400, "name is required")
     _require_patient(entry.patientId)
+
+    ts_utc: Optional[str] = None
+    if entry.ts_utc is not None:
+        try:
+            ts_utc = store.normalise_ts(entry.ts_utc)
+        except ValueError:
+            raise HTTPException(400, "ts_utc must be an ISO-8601 timestamp")
+        # A minute of grace for a client clock that runs fast.
+        limit = datetime.now(timezone.utc) + timedelta(seconds=60)
+        if ts_utc > limit.isoformat(timespec="milliseconds"):
+            raise HTTPException(400, "ts_utc cannot be in the future")
+
     return store.add_manual_meal(
-        entry.name.strip(), entry.sodium_mg, entry.portion, patient_id=entry.patientId
+        entry.name.strip(), entry.sodium_mg, entry.portion,
+        ts_utc=ts_utc, patient_id=entry.patientId,
+        source=entry.source if ts_utc is not None else "manual",
     )
 
 
@@ -520,11 +627,14 @@ def add_manual_meal(entry: ManualMeal) -> dict:
 def list_manual_meals(
     limit: int = 25, patientId: str = store.DEFAULT_PATIENT_ID
 ) -> list[dict]:
+    # An unknown patient is a 404, not an empty log.
+    _require_patient(patientId)
     return store.list_manual_meals(limit, patientId)
 
 
 @app.delete("/api/manual-meals/{entry_id}")
 def delete_manual_meal(entry_id: int, patientId: str = store.DEFAULT_PATIENT_ID) -> dict:
+    _require_patient(patientId)
     if not store.delete_manual_meal(entry_id, patientId):
         raise HTTPException(404, "entry not found")
     return {"deleted": entry_id}

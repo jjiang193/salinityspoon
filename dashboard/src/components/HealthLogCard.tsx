@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import { HealthLog } from '../types';
 import { useApi } from '../hooks/useApi';
 import { sendJson } from '../lib/api';
@@ -19,18 +19,25 @@ const VISIBLE = 8;
  */
 export function HealthLogCard({ patientId, editable, revision, onChange }: {
   patientId: string;
-  /** The patient writes; the clinician reads. */
+  /** The patient writes. The clinician's page reads the log through
+   *  VitalsTimeline, which lists it with HealthLogTable below. */
   editable: boolean;
   revision: number;
   onChange?: () => void;
 }) {
-  const { data } = useApi<HealthLog[]>(`/v1/patients/${patientId}/health-log`, revision);
+  // Polled, so a log that could not be read fills in once the server is back.
+  const fetched = useApi<HealthLog[]>(`/v1/patients/${patientId}/health-log`, revision, 15000);
+  const data = fetched.data;
+  const error = fetched.error !== null;
   const [systolic, setSystolic] = useState('');
   const [diastolic, setDiastolic] = useState('');
   const [weight, setWeight] = useState('');
   const [note, setNote] = useState('');
   const [message, setMessage] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const systolicId = useId();
+  const weightId = useId();
+  const noteId = useId();
 
   const num = (v: string) => (v.trim() === '' ? null : Number(v));
 
@@ -65,21 +72,34 @@ export function HealthLogCard({ patientId, editable, revision, onChange }: {
 
       {editable && (
         <form onSubmit={submit}>
-          <div className="form-row">
-            <input className="field field-sm" inputMode="numeric" placeholder="Systolic"
-                   aria-label="Systolic blood pressure, mmHg"
-                   value={systolic} onChange={(e) => setSystolic(e.target.value)} />
-            <span className="unit-sep">/</span>
-            <input className="field field-sm" inputMode="numeric" placeholder="Diastolic"
-                   aria-label="Diastolic blood pressure, mmHg"
-                   value={diastolic} onChange={(e) => setDiastolic(e.target.value)} />
-            <input className="field field-sm" inputMode="decimal" placeholder="Weight kg"
-                   aria-label="Body weight, kilograms"
-                   value={weight} onChange={(e) => setWeight(e.target.value)} />
+          {/* Visible labels, as on the food form beside it: a placeholder is gone
+              the moment a number is typed, and "139 / 87  84" names nothing. */}
+          <div className="form-row form-row-labelled form-row-top">
+            <div className="field-group field-group-wide">
+              <label htmlFor={systolicId}>Blood pressure (mmHg)</label>
+              <div className="field-pair">
+                <input id={systolicId} className="field" inputMode="numeric" placeholder="e.g. 128"
+                       aria-label="Systolic blood pressure, mmHg" autoComplete="off"
+                       value={systolic} onChange={(e) => setSystolic(e.target.value)} />
+                <span className="unit-sep" aria-hidden="true">/</span>
+                <input className="field" inputMode="numeric" placeholder="e.g. 82"
+                       aria-label="Diastolic blood pressure, mmHg" autoComplete="off"
+                       value={diastolic} onChange={(e) => setDiastolic(e.target.value)} />
+              </div>
+            </div>
+            <div className="field-group">
+              <label htmlFor={weightId}>Weight (kg)</label>
+              <input id={weightId} className="field" inputMode="decimal" placeholder="e.g. 84.5"
+                     autoComplete="off"
+                     value={weight} onChange={(e) => setWeight(e.target.value)} />
+            </div>
           </div>
-          <div className="form-row" style={{ marginTop: 8 }}>
-            <input className="field" placeholder="Note (optional)" aria-label="Note"
-                   value={note} onChange={(e) => setNote(e.target.value)} />
+          <div className="form-row form-row-labelled" style={{ marginTop: 10 }}>
+            <div className="field-group">
+              <label htmlFor={noteId}>Note (optional)</label>
+              <input id={noteId} className="field" autoComplete="off"
+                     value={note} onChange={(e) => setNote(e.target.value)} />
+            </div>
             <button className="btn" type="submit" disabled={saving}>
               {saving ? 'Saving…' : 'Log'}
             </button>
@@ -88,36 +108,51 @@ export function HealthLogCard({ patientId, editable, revision, onChange }: {
       )}
       {message && <p className="form-note">{message}</p>}
 
-      {entries.length === 0 ? (
-        <p className="empty">Nothing logged yet.</p>
+      {error && !data ? (
+        // A log that could not be read is not an empty log.
+        <p className="empty" role="status">Can't load the health log right now.</p>
+      ) : entries.length === 0 ? (
+        <p className="empty">{data ? 'Nothing logged yet.' : 'Loading…'}</p>
       ) : (
-        <div className="scroller"><table style={{ marginTop: editable ? 16 : 0 }}>
-          <thead>
-            <tr>
-              <th>When</th>
-              <th className="num">Blood pressure</th>
-              <th className="num pad">Weight</th>
-              <th>Note</th>
-            </tr>
-          </thead>
-          <tbody>
-            {entries.map((h) => (
-              <tr key={h.id}>
-                <td className="primary nowrap">{dayAndTime(h.timestamp)}</td>
-                <td className="num primary nowrap">
-                  {h.systolic !== null ? <>{h.systolic}/{h.diastolic} <small className="muted">mmHg</small></>
-                                       : <span className="muted">—</span>}
-                </td>
-                <td className="num pad nowrap">
-                  {h.weightKg !== null ? <>{h.weightKg.toFixed(1)} <small className="muted">kg</small></>
-                                       : <span className="muted">—</span>}
-                </td>
-                <td>{h.note ?? <span className="muted">—</span>}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table></div>
+        <HealthLogTable entries={entries} style={{ marginTop: editable ? 16 : 0 }} />
       )}
     </section>
+  );
+}
+
+/** The readings exactly as entered, newest first as given. */
+export function HealthLogTable({ entries, style }: {
+  entries: HealthLog[];
+  style?: React.CSSProperties;
+}) {
+  return (
+    <div className="scroller"><table style={style}>
+      <thead>
+        <tr>
+          <th>When</th>
+          <th className="num">
+            <span className="hide-phone">Blood pressure</span><span className="show-phone">BP</span>
+          </th>
+          <th className="num pad">Weight</th>
+          <th>Note</th>
+        </tr>
+      </thead>
+      <tbody>
+        {entries.map((h) => (
+          <tr key={h.id}>
+            <td className="primary nowrap">{dayAndTime(h.timestamp)}</td>
+            <td className="num primary nowrap">
+              {h.systolic !== null ? <>{h.systolic}/{h.diastolic} <small className="muted">mmHg</small></>
+                                   : <span className="muted">—</span>}
+            </td>
+            <td className="num pad nowrap">
+              {h.weightKg !== null ? <>{h.weightKg.toFixed(1)} <small className="muted">kg</small></>
+                                   : <span className="muted">—</span>}
+            </td>
+            <td>{h.note ?? <span className="muted">—</span>}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table></div>
   );
 }

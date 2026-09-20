@@ -4,7 +4,9 @@ Context for picking this up cold — a fresh terminal session, or a teammate who
 has not read the thread. Read this, then `README.md`, then whichever doc in
 `docs/` covers what you are about to touch.
 
-Repo: `jjiang193/salinityspoon` · branch `main` · 4 commits, working tree clean.
+Repo: `jjiang193/salinityspoon` · branch `clinician-patient-views`, on top of
+`7edb66d`. The trust-layer / Today / sources / vitals change described below is
+stacked on it **uncommitted in the working tree**.
 
 ---
 
@@ -29,7 +31,7 @@ connected.** That is the single most important thing to know.
 |---|---|
 | Firmware logic | 113 host-side tests pass. **Never compiled for ESP32** |
 | Backend | Runs, verified end to end |
-| Dashboard | Builds clean, verified in both themes. Clinician and Patient tabs |
+| Dashboard | Builds clean, verified in both themes and at 390 px. Clinician (roster, patient), Patient portal, Live. Patient Today leads with what is left and this bowl; the clinician's page has sodium sources, a meals table with the bowl's mean salinity, and blood pressure and weight on the same day axis as sodium. Spoon liveness, refused dips and failed fetches each have their own state |
 | Patients | Five synthetic patients, per-patient targets. **No sign-in** — see below |
 | Simulator | Runs the same state machine as the firmware |
 | Record / replay | Verified: 1,074 events recorded, replayed, no duplicate loss |
@@ -217,6 +219,64 @@ threshold on eating speed — the evidence there concerns total energy intake, a
 the sodium link runs through it rather than being ours to claim. The LED's
 `PACE_GREEN_S 30` thresholds are **invented placeholders**; say so in the pitch.
 
+**The live label check judges the meal's mean, not the bite.** `label_check` on
+`bite` and on the session's `spoon` message is the check of the open meal's weight-averaged salinity
+so far — the same judgement `/summary` makes of the finished meal. It was the
+single bite's; near the 2× threshold the flag flipped on and off from one
+spoonful to the next, and a flag that flickers is a flag nobody believes.
+
+**A day's range is the linear sum of its per-bite ranges — overstated on
+purpose.** Random scoop error cancels as √n, so the true spread of a day is
+narrower than `total_sodium_mg_low/high` says. It is kept because it is the one
+error model the contract already has (a meal's range is built the same way), and
+an honest-but-wide range beats a second model nobody has validated. Self-reported
+food is added as entered; it carries no range. Days now carry a range like every
+other sodium figure, and today is drawn faded and labelled "today so far" in the
+day chart and the roster sparkline, because it is excluded from the averages and
+a chart that always ends low reads as improvement. `range=week` is therefore
+eight rows - the seven full days the averages cover, then today - so the solid
+bars a clinician counts are the days "6 of 7 over target" was counted over.
+
+**A spoon silent in the middle of a meal is an attention-tier state.**
+`sev.spoonLink` reuses the existing critical role; it did not earn a new colour.
+The reason it gets colour at all: while it lasts every dip is lost and every
+live value on the page is the last one, not the current one, so a frozen spoon
+is otherwise indistinguishable from a working one — the same order of failure as
+the interlock, and someone can fix it at once by switching the spoon on. Between
+meals a silent spoon is a spoon in a drawer, and stays ambient. Mid-meal silence
+is judged in `useTelemetry`, from the arrival of the session's samples: none for
+3 s (`SILENT_MS`) is `spoonLive` false, and `silentForS` counts up. `sample_age_s`
+on `GET /api/spoon` is a different, slower signal - "is any spoon switched on",
+10 s (`SPOON_ONLINE_S` in `App.tsx`), by the server's clock - and only feeds the
+ambient between-meals hints. On the patient's Today and on Live it is a banner
+in the alert slot, above the interlock's, and Live pauses its projection; the
+clinician's patient page says it as plain text ("Meal open, spoon silent for
+…"), because the clinician cannot switch the spoon on. "Mid-meal" ends: the
+server closes a meal nobody has fed for 20 minutes by its own clock
+(`MealTracker.close_if_idle`, on a 30 s timer in `main.py`), not only lazily on
+the next bite, so the alert cannot outlive the meal. Silence is only ever reported while the session socket is open:
+with the server down the spoon cannot be heard, which is the server's fault to
+report ("Can't reach the server"), not the spoon's.
+
+**A dip "not counted" is inferred in the dashboard.** The simulator's state
+machine goes CONFIRM → IDLE with no bite and never emits `ABORT`, so
+`useTelemetry` counts a dip as refused when the detector leaves a dip and no
+bite follows. Real firmware's `ABORT` is honoured as well. If the firmware ever
+reports refusals itself, prefer that and delete the inference.
+
+**Blood pressure and weight are drawn, never interpreted.** `VitalsTimeline`
+puts the health log on the sodium chart's day axis as two small multiples, each
+with its own y-axis, in one neutral ink: no thresholds, bands, arrows,
+correlation figure or second axis on the sodium chart. It is there so the
+clinician does not line a table up with a chart by eye — not to suggest cause.
+The same readings as a table ("Readings as entered") are a closed `<details>`
+inside that card; the separate health-log card was removed from the clinician's
+page because it repeated the plot. The patient portal keeps its editable one.
+
+**A self-reported item is bounded at 5,000 mg**, on the form and again on the
+server (`MANUAL_MAX_MG`). 99999 is a typo, and one typo turns a roster row
+critical. From 2,000 mg the form asks once before saving.
+
 ---
 
 ## Next steps, in order
@@ -267,7 +327,9 @@ absolute deviation. If you change the capture logic, run the tests.
 "Viewing as" dropdown on the Patient tab stands in for a session. PLAN.md §9's
 `can_access(user, patientId)` does not exist yet and must before any of this
 leaves a laptop. Every patient-scoped endpoint goes through `_require_patient`
-in `main.py`, which is where that check belongs.
+in `main.py`, which is where that check belongs. That includes labelling and
+ending a meal: `POST /api/meals/label` and `/api/meals/close` carry `patientId`
+and answer 409 when the open meal is someone else's.
 
 **One spoon, one holder.** A bite that opens a meal on its own belongs to whoever
 the spoon is paired with (`POST /v1/devices/{id}/pair`), default `demo-1`.
@@ -312,6 +374,10 @@ at 8 rows.
 | `firmware/test/` | Host-side logic tests |
 | `backend/app/` | FastAPI, SQLite. `cohort.py` is the clinician-view arithmetic |
 | `dashboard/src/` | React + Vite + TS. `views/` holds the three screens |
+| `dashboard/src/lib/severity.ts` | The only place a colour tier is chosen. `rosterReasons` feeds the roster's chip, tiles and the patient page's reasons, so they cannot disagree |
+| `dashboard/src/lib/sodium.ts`, `lib/api.ts` | One number format (`fmtMg`) and one set of user-facing error wording. No URL path reaches a user |
+| `dashboard/src/hooks/useTelemetry.ts` | The live session: spoon liveness, refused dips, the 200 ms flush |
+| `dashboard/src/components/` | `TodayHero` + `BowlCard` (patient Today), `SessionCard` (the one place a label is declared), `SodiumSources`, `VitalsTimeline`, the three alert banners |
 | `tools/` | Simulator, replay, and `seed_demo.py` |
 
 One thing to internalise before touching the firmware: **a real scoop is half a

@@ -156,9 +156,25 @@ on every insert.
 Extensions: `total_sodium_mg_low`, `total_sodium_mg_high`, `total_weight_g`,
 `product_name`, `label_claim`.
 
+In `GET /v1/patients/{id}/summary` each meal also carries what the bowl was and
+how it sat against its label. All derived from the stored totals, none stored:
+
+| Field | Type, unit | Definition |
+|---|---|---|
+| `mean_salinity_g_l` | float g/L NaCl-equivalent, or `null` | `totalSodium / (0.3934 × total_weight_g)`: the weight-averaged salinity of the bowl. Present for every weighed meal, declared or not. `null` only when `total_weight_g` is 0 |
+| `mg_per_serving` | float mg, or `null` | Sodium in a 240 mL reference serving at that salinity. `null` with `mean_salinity_g_l` |
+| `label_claim_label` | string | The claim in words, e.g. `Low sodium` |
+| `label_flagged` | bool | The mean is at least 2× the claim's limit |
+| `label_severity` | `none` \| `info` \| `warning` | `info` is 1–2× the limit: over the claim, under the flag. It is **not** "consistent with the label". `none` covers both a consistent meal and a meal with no check |
+| `label_ratio` | float, or `null` | `mg_per_serving` over the claim's per-serving limit. `null` with no claim, or a claim with no absolute limit (`reduced_sodium`) |
+| `label_headline`, `label_detail` | string, or `null` | The check in words. `null` when there is no claim to check |
+
 **Meal grouping.** A meal is a run of bites from one device with no gap longer
 than 20 minutes (`MEAL_GAP_MINUTES`), or an explicit start and end from the
-patient portal.
+patient portal. The gap is enforced by the server's clock as well as by the next
+bite: an open meal that has been neither started nor fed for 20 minutes is closed
+by a timer (`MealTracker.close_if_idle`, checked every 30 s) and `meal_ended` is
+sent, so a patient who puts the spoon down is not "in a meal" until tomorrow.
 
 ## Other NaTrack entities
 
@@ -187,15 +203,90 @@ NaTrack's endpoints, at NaTrack's paths. Responses carry the entities above.
 | Endpoint | Returns |
 |---|---|
 | `GET /v1/patients?clinicianId=` | Patients with a trailing-window summary each |
-| `GET /v1/patients/{id}/summary?range=day\|week\|month` | One patient: summary, a `daily` series of 1 / 7 / 30 days, `MealSummary` rows, self-reported food |
+| `GET /v1/patients/{id}/summary?range=day\|week\|month` | One patient: summary, a `daily` series of 1 / 8 / 30 days, `MealSummary` rows, self-reported food |
 | `GET /v1/patients/{id}/bites?from=&to=` | `BiteEvent`s, oldest first. `from` / `to` are ISO-8601 |
 | `PUT /v1/patients/{id}/target` | Body `{"sodiumTarget": 1500}`. 500–5000 |
 | `POST /v1/patients/{id}/health-log` | Body: any of `systolic` + `diastolic`, `weightKg`, `note` |
 | `POST /v1/devices/{id}/pair` | Body `{"patientId": "demo-2"}` |
 
+`daily` ends on today. For `range=week` it is **8 rows**: the seven full days
+the averages and `days_over_target` cover, then today, so the finished days a
+chart draws are exactly the days the summary counted. `month` is 30 rows, today
+included.
+
 Not in NaTrack, kept under `/api/`: meal start/close/label, self-reported food,
 today's intake, the label check, device calibration, recording, and
 `GET /v1/patients/{id}/health-log` (NaTrack specifies only the write).
+
+### Days carry their range
+
+Every row of `daily` (and `today`), and `GET /api/intake/today`, carries the
+range beside each sodium figure. All mg.
+
+| Field | Definition |
+|---|---|
+| `measured_sodium_mg_low`, `measured_sodium_mg_high` | Sum of the day's bites' `sodium_mg_low` / `sodium_mg_high` |
+| `total_sodium_mg_low`, `total_sodium_mg_high` | The measured range plus `manual_sodium_mg` as entered. Self-reported food carries no range of its own |
+
+A linear sum, the same method a meal's `total_sodium_mg_low/high` uses. It
+overstates a day's spread, because random scoop error cancels as √n; it is kept
+because it is the one error model the contract already has. A day with
+`logged: false` has all four at 0 and is still not a zero day.
+
+### `sources` — where the logged sodium came from
+
+In `GET /v1/patients/{id}/summary`, covering the same local days as `daily`
+(today included). Summed server-side because `meals` and `manual_meals` in the
+same response are capped at 60 and 40 rows.
+
+| Field | Type, unit | Definition |
+|---|---|---|
+| `days` | int | Length of the range, as `daily` |
+| `days_logged` | int | Days in `daily` with `logged: true` |
+| `total_sodium_mg`, `measured_sodium_mg`, `manual_sodium_mg` | float, mg | Sums over `items` |
+| `items` | array | Sorted by `sodium_mg`, largest first. A sort order, not a score |
+
+Each item:
+
+| Field | Type, unit | Definition |
+|---|---|---|
+| `kind` | `measured` \| `manual` | Spoon-measured meals, or self-reported food. **Never merged into one row**, even under the same name |
+| `name` | string, or `null` | Measured: `product_name`; `null` means the product was never declared. Manual: the entry's name. Both are grouped ignoring case and surrounding spaces, and shown as most recently typed |
+| `portion` | string, or `null` | Manual only: the most recent entry's portion |
+| `label_claim`, `label_claim_label` | string, or `null` | Measured only. Meals group by product **and** claim |
+| `count` | int | Meals, or entries |
+| `sodium_mg` | float, mg | |
+| `share_pct` | float, 0–100 | Of `total_sodium_mg` — of **logged** sodium, not of what the patient ate. 0 when nothing was logged |
+| `mean_salinity_g_l` | float g/L NaCl-equivalent, or `null` | Measured only: Σ `totalSodium` / (0.3934 × Σ `total_weight_g`) |
+| `mg_per_serving` | float mg, or `null` | Measured only: per 240 mL reference serving |
+| `flagged_count` | int | Meals in the group whose own label check is flagged |
+
+A meal is placed by its `start` and a `daily` row by each bite's `timestamp`, so
+a bowl eaten across the range's first midnight can leave `total_sodium_mg` a few
+bites away from the sum of `daily`.
+
+### `GET /api/spoon`
+
+`patientId`, `mealId`, `deviceId` — who holds the spoon — plus:
+
+| Field | Type, unit | Definition |
+|---|---|---|
+| `spoon_seen` | bool | A `sample/v2` has arrived since the backend started. Says nothing about now |
+| `sample_age_s` | float s, or `null` | Seconds since the last sample, **by the server's clock**, so a client's clock skew cannot matter. `null` until the first sample. This is the liveness signal: `/api/health`'s `spoon_seen` latches for the life of the process |
+
+### `POST /api/manual-meals`
+
+Body `name`, `sodium_mg`, optional `portion`, `patientId`, `ts_utc`, `source`.
+
+| Field | Accepted | Otherwise |
+|---|---|---|
+| `sodium_mg` | 0–5,000 mg for one item | 400. 99999 is a typo, and one typo turns a roster row critical |
+| `ts_utc` | ISO-8601, no more than 60 s ahead of the server. Stored as UTC with milliseconds. Omitted means now | 400. Exists for Undo: a deleted entry restored keeps its original time, and so its original day |
+| `source` | `manual` (default) or `seed`. Honoured only together with `ts_utc`; otherwise stored as `manual` | 422. Exists for Undo only: a seeded entry removed and restored stays tagged, so `seed_demo.py --reset` still removes exactly the seeded rows |
+
+`GET /api/manual-meals`, `DELETE /api/manual-meals/{id}` and `GET /api/meals` answer
+404 for an unknown `patientId`, like every other patient-scoped endpoint: an
+unknown patient is not an empty log.
 
 ---
 
@@ -263,8 +354,14 @@ allowed to count.
 NaTrack: a WebSocket per patient, onto which the backend pushes each new bite.
 A session receives that patient's events and nothing about anyone else.
 
+An unknown `patientId` is accepted and then closed with code **4404** (reason
+`patient not found`). Clients must not retry on 4404; any other close is a lost
+server and is retried.
+
 ```json
-{ "type": "spoon", "holder": true, "busy": false, "mealId": 7 }
+{ "type": "spoon", "holder": true, "busy": false, "mealId": 7,
+  "product_name": "Heart-Smart Broth", "label_claim": "low_sodium",
+  "label_check": { } }
 { "type": "meal_started", "mealId": 7, "patientId": "demo-1" }
 { "type": "bite", "received_at": "...", "mealId": 7, "patientId": "demo-1",
   "data": { "...": "bite/v2" }, "meal_totals": { "...": "MealSummary totals" },
@@ -280,6 +377,33 @@ the spoon, so `sample`s will follow. `busy` — someone else is mid-meal with it
 deliberately says no more than that, because who is eating is another patient's
 health data. `mealId` is this patient's open meal, for backfilling a page opened
 mid-meal.
+
+`product_name`, `label_claim` and `label_check` are what the holder declared for
+their open meal, and how it sits against that claim. They are re-sent when the
+label is set (`POST /api/meals/start`, `POST /api/meals/label`), so a session
+learns the label without waiting for a bite. For everyone but the holder, and
+with no meal open, they are `null`, `"none"` and `null`: nothing about another
+patient's bowl is sent.
+
+`POST /api/meals/label` takes `{"patientId", "product_name", "label_claim"}` and
+`POST /api/meals/close` takes `{"patientId"}`. `patientId` is required on both:
+it goes through the same patient check as every other patient-scoped call, and
+the answer is `409` ("the spoon is in another patient's meal") when the open
+meal is not that patient's. `product_name` is stored stripped, as
+`POST /api/meals/start` stores it.
+
+`label_check`, here and on `bite`, is the label check of the **meal's mean**
+salinity so far — the same judgement `GET …/summary` makes of the finished meal
+— plus `product_name`. It was the single bite's; near the 2× threshold that
+flipped the flag on and off from one spoonful to the next. It is `null` until a
+bite has been weighed. With `label_claim` `none` it is still present, unflagged,
+carrying `measured_mg_per_serving`.
+
+On connect the holder is primed with the last `bite` of the **open** meal (never
+a closed one's) and the last `sample`. The primer bite carries the label check
+as it stands at connect, not as it stood when the bite landed — the label may
+have been declared since. The primer sample keeps its original `received_at`,
+which is how a client tells a spoon switched off an hour ago from a live one.
 
 `sample` is an extension: NaTrack pushes bites only. It reaches the holder's
 sessions and exists for the live trace and for tuning.

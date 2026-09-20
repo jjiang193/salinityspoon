@@ -198,7 +198,16 @@ def _seed_day(conn, patient_id: str, day: date, age_days: int, tz: timezone) -> 
 
     # A morning reading, most days but not all: real logs have holes.
     at = datetime.combine(day, time(7, rng.randint(5, 55)), tz)
-    if profile["bp"] and at < now and rng.random() < 0.7:
+    # A day is re-seeded when a top-up finds no seeded food on it yet - this
+    # morning, before lunch. Its reading may already be there, and unlike a
+    # bite a health log has no key to be ignored on: it would be written twice.
+    logged = conn.execute(
+        """SELECT 1 FROM health_logs WHERE patientId = ? AND source = 'seed'
+              AND timestamp >= ? AND timestamp < ? LIMIT 1""",
+        (patient_id, _iso(datetime.combine(day, time.min, tz)),
+         _iso(datetime.combine(day + timedelta(days=1), time.min, tz))),
+    ).fetchone()
+    if profile["bp"] and not logged and at < now and rng.random() < 0.7:
         systolic = profile["bp"][0] + rng.randint(-7, 7)
         diastolic = profile["bp"][1] + rng.randint(-5, 5)
         kg0, change = profile["kg"]

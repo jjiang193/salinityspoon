@@ -26,8 +26,10 @@ from . import labels, salinity, store
 # Trailing window for the averages, in full days before today.
 WINDOW_DAYS = 7
 
-# NaTrack's `range` parameter, as a number of days in the `daily` series.
-RANGE_DAYS = {"day": 1, "week": 7, "month": 30}
+# NaTrack's `range` parameter, as a number of days in the `daily` series. A week
+# is the averaged window plus today: the seven finished days a chart draws are
+# then exactly the seven the averages and "days over target" were counted over.
+RANGE_DAYS = {"day": 1, "week": WINDOW_DAYS + 1, "month": 30}
 
 # The roster's sparkline.
 ROSTER_DAYS = 14
@@ -42,19 +44,133 @@ TARGET_MIN_MG = 500
 TARGET_MAX_MG = 5000
 
 
+def _salinity_g_l(sodium_mg: float, weight_g: float) -> Optional[float]:
+    if weight_g <= 0:
+        return None
+    return sodium_mg / (salinity.SODIUM_FRACTION_OF_NACL * weight_g)
+
+
+def meal_salinity_g_l(meal: dict[str, Any]) -> Optional[float]:
+    """What the bowl was: the meal's weight-averaged NaCl-equivalent salinity,
+    g/L. None until a bite has been weighed. Grams stand in for millilitres
+    here, as they do in sodiumEstimate."""
+    return _salinity_g_l(meal["totalSodium"], meal["total_weight_g"])
+
+
 def label_check(meal: dict[str, Any]) -> Optional[labels.LabelCheck]:
     """Check a finished meal against its label, from the meal's mean salinity.
 
     Mean, not last bite: a clinician reading history wants what the bowl was,
     and the weight-averaged mean over thirty bites is the better estimate.
-    Grams stand in for millilitres here, as they do in sodiumEstimate.
     """
-    if meal["label_claim"] == "none" or meal["total_weight_g"] <= 0:
+    g_l = meal_salinity_g_l(meal)
+    if meal["label_claim"] == "none" or g_l is None:
         return None
-    g_l = meal["totalSodium"] / (
-        salinity.SODIUM_FRACTION_OF_NACL * meal["total_weight_g"]
-    )
     return labels.check(g_l, meal["label_claim"])
+
+
+def live_label_check(meal_id: Optional[int]) -> Optional[dict[str, Any]]:
+    """The open meal against its label, as the live session carries it.
+
+    Judged on the meal's mean so far, not on the bite that just landed. Near
+    the 2x threshold a single bite flips the flag on and off from one spoonful
+    to the next, and history already judges a meal by its mean: the live view
+    and the clinician's table must not disagree about the same bowl.
+    """
+    meal = store.get_meal_row(meal_id) if meal_id is not None else None
+    g_l = meal_salinity_g_l(meal) if meal else None
+    if g_l is None:
+        return None
+    return {
+        "product_name": meal["product_name"],
+        **labels.check(g_l, meal["label_claim"]).__dict__,
+    }
+
+
+def sources(
+    patient_id: str, days: int, tz_offset_min: int = 0,
+    daily: Optional[list[dict[str, Any]]] = None,
+) -> dict[str, Any]:
+    """Where the logged sodium came from, over the same local days as `daily`.
+
+    One row per product for what the spoon measured, one per name for what the
+    patient typed in. Measured and self-reported are never merged into one row,
+    even under the same name: they are not the same claim. Shares are of LOGGED
+    sodium only - a patient who logs only soup gets 100 % soup, which says
+    nothing about what they ate. Ranked by milligrams. It is a sort order, not
+    a score.
+
+    Meals are placed by when they started and days by when each bite landed, so
+    a bowl eaten across the window's first midnight can leave this total a few
+    bites off the sum of `daily`.
+    """
+    if daily is None:
+        daily = store.daily_totals(patient_id, days, tz_offset_min)
+
+    # Product names are typed by the patient: "Chicken broth" and "chicken broth "
+    # are one product. Grouped as the self-reported names are below, and shown
+    # in the first spelling seen.
+    measured: dict[tuple[Optional[str], str], dict[str, Any]] = {}
+    for meal in store.meals_in_window(patient_id, days, tz_offset_min):
+        product = (meal["product_name"] or "").strip() or None
+        item = measured.setdefault(
+            (product.lower() if product else None, meal["label_claim"]),
+            {
+                "kind": "measured",
+                "name": product,  # None: product not declared
+                "portion": None,
+                "label_claim": meal["label_claim"],
+                "label_claim_label": labels.CLAIM_LABEL.get(meal["label_claim"]),
+                "count": 0, "sodium_mg": 0.0, "weight_g": 0.0, "flagged_count": 0,
+            },
+        )
+        check = label_check(meal)
+        item["count"] += 1
+        item["sodium_mg"] += meal["totalSodium"]
+        item["weight_g"] += meal["total_weight_g"]
+        item["flagged_count"] += bool(check and check.flagged)
+
+    # Newest first, so the first entry seen in a group supplies how it is shown.
+    manual: dict[str, dict[str, Any]] = {}
+    for entry in store.manual_meals_in_window(patient_id, days, tz_offset_min):
+        item = manual.setdefault(
+            entry["name"].strip().lower(),
+            {
+                "kind": "manual",
+                "name": entry["name"].strip(),
+                "portion": entry["portion"],
+                "label_claim": None,
+                "label_claim_label": None,
+                "count": 0, "sodium_mg": 0.0, "weight_g": 0.0, "flagged_count": 0,
+            },
+        )
+        item["count"] += 1
+        item["sodium_mg"] += entry["sodium_mg"]
+
+    measured_mg = sum(i["sodium_mg"] for i in measured.values())
+    manual_mg = sum(i["sodium_mg"] for i in manual.values())
+    total = measured_mg + manual_mg
+
+    items = []
+    for item in (*measured.values(), *manual.values()):
+        g_l = _salinity_g_l(item["sodium_mg"], item.pop("weight_g"))
+        items.append({
+            **item,
+            "share_pct": item["sodium_mg"] / total * 100.0 if total > 0 else 0.0,
+            "mean_salinity_g_l": g_l,
+            "mg_per_serving": salinity.sodium_mg(g_l, labels.REFERENCE_SERVING_ML)
+            if g_l is not None else None,
+        })
+    items.sort(key=lambda i: i["sodium_mg"], reverse=True)
+
+    return {
+        "days": days,
+        "days_logged": sum(1 for d in daily if d["logged"]),
+        "total_sodium_mg": total,
+        "measured_sodium_mg": measured_mg,
+        "manual_sodium_mg": manual_mg,
+        "items": items,
+    }
 
 
 def _mean_logged(days: list[dict[str, Any]]) -> tuple[Optional[float], int]:

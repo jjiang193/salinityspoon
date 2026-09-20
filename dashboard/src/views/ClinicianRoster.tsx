@@ -1,6 +1,9 @@
+import { useState } from 'react';
 import { PatientSummary } from '../types';
 import { useApi } from '../hooks/useApi';
+import { errorText } from '../lib/api';
 import { href } from '../lib/route';
+import { fmtMg } from '../lib/sodium';
 import { daysAgo } from '../lib/time';
 import * as sev from '../lib/severity';
 import { Chip } from '../components/Chip';
@@ -14,43 +17,65 @@ import { StatTile } from '../components/StatTile';
  * one status chip and the rest is plain numbers. Everything is arithmetic over
  * logged days against the target the clinician set. There is no risk score here
  * and there should not be: this device measures soup.
+ *
+ * The three count tiles are filters. Counts and filters both read the keys of
+ * sev.rosterReasons, so a patient a tile counts is always a patient it finds -
+ * including one whose single chip is saying something more pressing. While a
+ * filter is on, the row prints that reason as text; it still carries one chip.
  */
 /** The roster watches every patient and so has no session socket; it polls. */
 const POLL_MS = 10_000;
 
+const FILTER_LABEL: Partial<Record<sev.ReasonKey, string>> = {
+  'above-avg': 'above target on average',
+  'trending-up': 'trending up',
+  lapsed: 'not logging',
+};
+
 export function ClinicianRoster({ clinicianId = 'clinician-1' }: { clinicianId?: string }) {
   const { data, loading, error } =
     useApi<PatientSummary[]>(`/v1/patients?clinicianId=${clinicianId}`, 0, POLL_MS);
+  const [filter, setFilter] = useState<sev.ReasonKey | null>(null);
 
   if (loading) return <p className="empty">Loading patients…</p>;
-  if (!data) return <p className="empty">Could not load patients{error && ` (${error})`}. Is the backend running?</p>;
+  if (!data) {
+    return (
+      <p className="empty" role="status">
+        Could not load patients. {errorText(new Error(error ?? ''))}
+      </p>
+    );
+  }
 
   const rows = data
-    .map((p) => ({
-      p,
-      status: sev.rosterStatus({
+    .map((p) => {
+      const input: sev.RosterInput = {
         pctToday: p.pct_of_target_today,
         pctAvg: p.pct_of_target_avg,
         daysSinceLog: p.days_since_log,
         flaggedMeals: p.flagged_meals,
         upwardDrift: p.upward_drift,
         driftPct: p.drift_pct,
-      }),
-    }))
+        windowDays: p.window_days,
+      };
+      return { p, status: sev.rosterStatus(input), reasons: sev.rosterReasons(input) };
+    })
     .sort((a, b) =>
       sev.urgency(a.status) - sev.urgency(b.status)
       || (b.p.pct_of_target_avg ?? 0) - (a.p.pct_of_target_avg ?? 0));
 
   const windowDays = data[0]?.window_days ?? 7;
-  const aboveAvg = data.filter((p) => (p.pct_of_target_avg ?? 0) >= 100).length;
-  const drifting = data.filter((p) => p.upward_drift).length;
-  const lapsed = data.filter((p) => (p.days_since_log ?? 0) >= sev.LAPSE_DAYS).length;
+  const count = (key: sev.ReasonKey) =>
+    rows.filter((r) => r.reasons.some((x) => x.key === key)).length;
+  const toggle = (key: sev.ReasonKey) => setFilter(filter === key ? null : key);
+  const visible = filter === null
+    ? rows
+    : rows.filter((r) => r.reasons.some((x) => x.key === filter));
 
   return (
     <>
       <div className="view-head">
         <div>
-          <h2 className="view-title">Patients</h2>
+          <h2 className="view-title" tabIndex={-1}>Patients</h2>
           <p className="view-sub">
             Sodium intake against each patient's own target · averages cover the last{' '}
             {windowDays} full days
@@ -60,15 +85,30 @@ export function ClinicianRoster({ clinicianId = 'clinician-1' }: { clinicianId?:
 
       <div className="tiles">
         <StatTile label="Monitored" value={String(data.length)} note="patients with a spoon" />
-        <StatTile label={`Above target · ${windowDays}-day avg`} value={String(aboveAvg)}
-                  note={`of ${data.length} patients`} />
-        <StatTile label="Trending up" value={String(drifting)}
-                  note="this week 15%+ above last week" />
-        <StatTile label="Not logging" value={String(lapsed)}
-                  note={`${sev.LAPSE_DAYS}+ days without an entry`} />
+        <StatTile label="Above target" value={String(count('above-avg'))}
+                  note={`of ${data.length} patients · ${windowDays}-day average`}
+                  onClick={() => toggle('above-avg')} pressed={filter === 'above-avg'} />
+        <StatTile label="Trending up" value={String(count('trending-up'))}
+                  note="this week 15%+ above last week"
+                  onClick={() => toggle('trending-up')} pressed={filter === 'trending-up'} />
+        <StatTile label="Not logging" value={String(count('lapsed'))}
+                  note={`${sev.LAPSE_DAYS}+ days without an entry`}
+                  onClick={() => toggle('lapsed')} pressed={filter === 'lapsed'} />
       </div>
 
       <section className="card" style={{ marginTop: 16 }}>
+        {/* Always mounted, so a screen reader hears the table change under it. */}
+        <p className="filter-line" role="status">
+          {filter !== null && (
+            <>
+              Showing {visible.length} of {rows.length} · {FILTER_LABEL[filter]} ·{' '}
+              <button type="button" className="btn-link" onClick={() => setFilter(null)}>
+                Show all
+              </button>
+            </>
+          )}
+        </p>
+        {visible.length === 0 ? <p className="empty">No patients match.</p> : (
         <div className="scroller"><table className="roster">
           <thead>
             <tr>
@@ -83,7 +123,7 @@ export function ClinicianRoster({ clinicianId = 'clinician-1' }: { clinicianId?:
             </tr>
           </thead>
           <tbody>
-            {rows.map(({ p, status }) => {
+            {visible.map(({ p, status, reasons }) => {
               const to = href({ view: 'clinician', patientId: p.patientId });
               return (
                 <tr key={p.patientId} onClick={() => { location.hash = to; }}>
@@ -92,6 +132,12 @@ export function ClinicianRoster({ clinicianId = 'clinician-1' }: { clinicianId?:
                     <div className="sub-line">
                       {[p.age, p.condition].filter(Boolean).join(' · ')}
                     </div>
+                    {/* Why the filter kept this row, when its chip says something else. */}
+                    {filter !== null && (
+                      <div className="sub-line">
+                        {reasons.find((r) => r.key === filter)?.text}
+                      </div>
+                    )}
                     {/* On a phone the Status column scrolls out of sight, and it
                         is the one column that says who to look at. */}
                     <div className="status-inline"><Chip indicator={status} /></div>
@@ -100,7 +146,7 @@ export function ClinicianRoster({ clinicianId = 'clinician-1' }: { clinicianId?:
                   <td className="num">
                     {p.avg_sodium_mg === null ? <span className="muted">—</span> : (
                       <>
-                        <span className="primary">{Math.round(p.avg_sodium_mg).toLocaleString()}</span>
+                        <span className="primary">{fmtMg(p.avg_sodium_mg)}</span>
                         <div className="sub-line">{p.pct_of_target_avg!.toFixed(0)}% of target</div>
                       </>
                     )}
@@ -117,7 +163,7 @@ export function ClinicianRoster({ clinicianId = 'clinician-1' }: { clinicianId?:
                   <td className="num">
                     {p.today.logged
                       ? <>
-                          <span className="primary">{Math.round(p.today.total_sodium_mg).toLocaleString()}</span>
+                          <span className="primary">{fmtMg(p.today.total_sodium_mg)}</span>
                           <div className="sub-line">{p.pct_of_target_today.toFixed(0)}% of target</div>
                         </>
                       : <span className="muted">—</span>}
@@ -134,6 +180,7 @@ export function ClinicianRoster({ clinicianId = 'clinician-1' }: { clinicianId?:
             })}
           </tbody>
         </table></div>
+        )}
       </section>
 
       <p className="footnote">

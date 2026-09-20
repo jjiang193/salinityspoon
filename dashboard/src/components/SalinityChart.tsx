@@ -3,7 +3,7 @@ import {
   Tooltip, XAxis, YAxis,
 } from 'recharts';
 import { ChartPoint } from '../types';
-import { clockTime, relativeTick } from '../lib/time';
+import { clockTime, relativeTick, relativeTicks } from '../lib/time';
 
 function SaltTip({ active, payload, label }: any) {
   if (!active || !payload?.length) return null;
@@ -50,7 +50,7 @@ export function SalinityChart({ points }: { points: ChartPoint[] }) {
         <p className="empty">Waiting for samples…</p>
       ) : (
         <ResponsiveContainer width="100%" height={220}>
-          <LineChart data={points} margin={{ top: 4, right: 8, bottom: 0, left: -12 }}>
+          <LineChart data={points} margin={{ top: 4, right: 8, bottom: 0, left: -4 }}>
             <CartesianGrid stroke="var(--grid)" strokeDasharray="0" vertical={false} />
 
             {/* Context band, not a target. */}
@@ -58,11 +58,12 @@ export function SalinityChart({ points }: { points: ChartPoint[] }) {
               y1={0.3} y2={0.6}
               fill="var(--band-fill)" stroke="none"
               label={{ value: 'lower-sodium range', position: 'insideTopLeft',
-                       fill: 'var(--text-muted)', fontSize: 10 }}
+                       fill: 'var(--text-muted)', fontSize: 11 }}
             />
 
             <XAxis
               dataKey="t" type="number" domain={['dataMin', 'dataMax']}
+              ticks={relativeTicks(points[0].t, now)}
               tickFormatter={(t: number) => relativeTick(t, now)}
               stroke="var(--axis)" tickLine={false}
               tick={{ fill: 'var(--text-muted)', fontSize: 11 }} minTickGap={48}

@@ -200,6 +200,21 @@ def _day_start_utc(day: date, tz_offset_min: int) -> str:
     return start.isoformat(timespec="milliseconds")
 
 
+def _window_start_utc(days: int, tz_offset_min: int) -> str:
+    """UTC start of the first of `days` local days, today being the last."""
+    first = _local_today(tz_offset_min) - timedelta(days=days - 1)
+    return _day_start_utc(first, tz_offset_min)
+
+
+def normalise_ts(ts: str) -> str:
+    """Any ISO-8601 timestamp as the stored form: UTC, milliseconds.
+
+    Raises ValueError on anything else. Stored timestamps are compared as
+    strings, so one in another zone or precision would sort into the wrong day.
+    """
+    return _parse_ts(ts).astimezone(timezone.utc).isoformat(timespec="milliseconds")
+
+
 # --- Patients and clinicians -----------------------------------------------
 def list_patients(clinician_id: Optional[str] = None) -> list[dict[str, Any]]:
     with connect() as conn:
@@ -236,17 +251,26 @@ def daily_totals(
 
     A day with nothing logged is reported as `logged: False`, not as zero
     intake. Nobody ate 0 mg of sodium; they did not use the spoon.
+
+    The `_low` / `_high` keys are a linear sum of the per-bite ranges, the same
+    method recompute_meal uses for a meal. That overstates a day's spread,
+    because random scoop error cancels as root-n (HANDOFF.md) - do not invent a
+    different error model here. Self-reported food carries no range, so it
+    counts as entered at both ends.
     """
-    today = _local_today(tz_offset_min)
-    first = today - timedelta(days=days - 1)
-    since = _day_start_utc(first, tz_offset_min)
+    first = _local_today(tz_offset_min) - timedelta(days=days - 1)
+    since = _window_start_utc(days, tz_offset_min)
 
     buckets: dict[date, dict[str, Any]] = {
         first + timedelta(days=i): {
             "date": (first + timedelta(days=i)).isoformat(),
             "measured_sodium_mg": 0.0,
+            "measured_sodium_mg_low": 0.0,
+            "measured_sodium_mg_high": 0.0,
             "manual_sodium_mg": 0.0,
             "total_sodium_mg": 0.0,
+            "total_sodium_mg_low": 0.0,
+            "total_sodium_mg_high": 0.0,
             "bite_count": 0,
             "manual_count": 0,
             "logged": False,
@@ -256,12 +280,16 @@ def daily_totals(
 
     with connect() as conn:
         bites = conn.execute(
-            """SELECT timestamp AS ts, sodiumEstimate AS mg FROM bites
+            """SELECT timestamp AS ts, sodiumEstimate AS mg,
+                      json_extract(payload, '$.sodium_mg_low') AS low,
+                      json_extract(payload, '$.sodium_mg_high') AS high
+                 FROM bites
                 WHERE patientId = ? AND timestamp >= ?""",
             (patient_id, since),
         ).fetchall()
         manual = conn.execute(
-            """SELECT ts_utc AS ts, sodium_mg AS mg FROM manual_meals
+            """SELECT ts_utc AS ts, sodium_mg AS mg, NULL AS low, NULL AS high
+                 FROM manual_meals
                 WHERE patientId = ? AND ts_utc >= ?""",
             (patient_id, since),
         ).fetchall()
@@ -274,8 +302,16 @@ def daily_totals(
             day = buckets.get(local_date(r["ts"], tz_offset_min))
             if day is None:
                 continue
+            # A payload without a range, or a manual entry, is its own range.
+            low = r["mg"] if r["low"] is None else r["low"]
+            high = r["mg"] if r["high"] is None else r["high"]
             day[mg_key] += r["mg"]
             day["total_sodium_mg"] += r["mg"]
+            day["total_sodium_mg_low"] += low
+            day["total_sodium_mg_high"] += high
+            if mg_key == "measured_sodium_mg":
+                day["measured_sodium_mg_low"] += low
+                day["measured_sodium_mg_high"] += high
             day[n_key] += 1
             day["logged"] = True
 
@@ -474,6 +510,30 @@ def list_meals(limit: int = 25, patient_id: str = DEFAULT_PATIENT_ID) -> list[di
         return [_meal(r) for r in rows]
 
 
+def get_meal_row(meal_id: int) -> Optional[dict[str, Any]]:
+    """The MealSummary alone. get_meal also loads every bite, which the live
+    label check would otherwise do once per spoonful."""
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM meals WHERE mealId = ?", (meal_id,)).fetchone()
+        return _meal(row) if row else None
+
+
+def meals_in_window(
+    patient_id: str, days: int, tz_offset_min: int = 0
+) -> list[dict[str, Any]]:
+    """Every meal with a bite in it that started in the last `days` local days,
+    today included, newest first. Bounded by date and not by a row limit, so a
+    sum over it cannot undercount. The same first day as daily_totals."""
+    with connect() as conn:
+        rows = conn.execute(
+            """SELECT * FROM meals
+                WHERE patientId = ? AND biteCount > 0 AND "start" >= ?
+                ORDER BY "start" DESC""",
+            (patient_id, _window_start_utc(days, tz_offset_min)),
+        ).fetchall()
+        return [_meal(r) for r in rows]
+
+
 def _bite_event(row: sqlite3.Row) -> dict[str, Any]:
     """A stored bite as NaTrack's BiteEvent: the device's payload plus the two
     ids only the backend knows."""
@@ -517,8 +577,13 @@ def intake_today(
 ) -> dict[str, Any]:
     midnight = _day_start_utc(_local_today(tz_offset_min), tz_offset_min)
     with connect() as conn:
+        # The range is the linear sum of per-bite ranges - see daily_totals.
         row = conn.execute(
-            """SELECT COALESCE(SUM(sodiumEstimate), 0) AS total, COUNT(*) AS bites
+            """SELECT COALESCE(SUM(sodiumEstimate), 0) AS total, COUNT(*) AS bites,
+                      COALESCE(SUM(COALESCE(
+                          json_extract(payload, '$.sodium_mg_low'), sodiumEstimate)), 0) AS low,
+                      COALESCE(SUM(COALESCE(
+                          json_extract(payload, '$.sodium_mg_high'), sodiumEstimate)), 0) AS high
                  FROM bites WHERE patientId = ? AND timestamp >= ?""",
             (patient_id, midnight),
         ).fetchone()
@@ -537,8 +602,12 @@ def intake_today(
         # dashboard labels which is which, because they are not the same claim.
         return {
             "measured_sodium_mg": row["total"],
+            "measured_sodium_mg_low": row["low"],
+            "measured_sodium_mg_high": row["high"],
             "manual_sodium_mg": manual["total"],
             "total_sodium_mg": row["total"] + manual["total"],
+            "total_sodium_mg_low": row["low"] + manual["total"],
+            "total_sodium_mg_high": row["high"] + manual["total"],
             "bite_count": row["bites"],
             "manual_count": manual["n"],
             "meal_count": meals["n"],
@@ -573,17 +642,18 @@ def get_meal_label(meal_id: Optional[int]) -> tuple[Optional[str], str]:
 def add_manual_meal(
     name: str, sodium_mg: float, portion: Optional[str] = None,
     ts_utc: Optional[str] = None, patient_id: str = DEFAULT_PATIENT_ID,
+    source: str = "manual",
 ) -> dict[str, Any]:
     stamp = ts_utc or utcnow_iso()
     with connect() as conn:
         cur = conn.execute(
-            """INSERT INTO manual_meals (patientId, ts_utc, name, portion, sodium_mg)
-               VALUES (?, ?, ?, ?, ?)""",
-            (patient_id, stamp, name, portion, sodium_mg),
+            """INSERT INTO manual_meals (patientId, ts_utc, name, portion, sodium_mg, source)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (patient_id, stamp, name, portion, sodium_mg, source),
         )
         return {
             "id": int(cur.lastrowid), "patientId": patient_id, "ts_utc": stamp,
-            "name": name, "portion": portion, "sodium_mg": sodium_mg, "source": "manual",
+            "name": name, "portion": portion, "sodium_mg": sodium_mg, "source": source,
         }
 
 
@@ -593,6 +663,20 @@ def list_manual_meals(limit: int = 25, patient_id: str = DEFAULT_PATIENT_ID) -> 
             """SELECT * FROM manual_meals WHERE patientId = ?
                 ORDER BY ts_utc DESC LIMIT ?""",
             (patient_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def manual_meals_in_window(
+    patient_id: str, days: int, tz_offset_min: int = 0
+) -> list[dict[str, Any]]:
+    """Every self-reported entry in the last `days` local days, today included,
+    newest first. No row limit, for the same reason as meals_in_window."""
+    with connect() as conn:
+        rows = conn.execute(
+            """SELECT * FROM manual_meals WHERE patientId = ? AND ts_utc >= ?
+                ORDER BY ts_utc DESC""",
+            (patient_id, _window_start_utc(days, tz_offset_min)),
         ).fetchall()
         return [dict(r) for r in rows]
 

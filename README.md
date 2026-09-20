@@ -33,9 +33,12 @@ cd dashboard && npm install && npm run dev
 ```
 
 Open http://localhost:5173. NaTrack's three views: **Clinician** (a roster of five
-synthetic patients, each against their own sodium target), **Patient portal**
-(start a meal, log food and blood pressure, see a month of history) and **Live**
-(whoever holds the spoon, as it happens).
+synthetic patients, each against their own sodium target; per patient, where the
+sodium comes from and blood pressure and weight on the same days), **Patient
+portal** (what is left today and how much of this bowl fits in it, start a meal,
+log solid food and blood pressure, a month of history) and **Live** (whoever
+holds the spoon, as it happens). A silent spoon, a refused dip and an unreachable
+server each say so rather than leaving the last number on screen.
 
 On Windows the venv's interpreter is `.venv/Scripts/python`, not `.venv/bin/`.
 
@@ -112,8 +115,9 @@ That matters clinically: for people with kidney disease, or on ACE inhibitors,
 ARBs or potassium-sparing diuretics, excess potassium risks hyperkalemia. No food
 database or barcode app can detect it. A conductivity measurement can.
 
-Declare a label claim on the dashboard and every bite is checked against FDA
-per-serving limits. It flags; it never diagnoses.
+Declare a label claim on the Patient portal and the meal's mean salinity is
+checked against FDA per-serving limits from the first bite. It flags; it never
+diagnoses.
 
 ### Liquids only, and honest about it
 
