@@ -16,7 +16,7 @@
 #define EC_ADS_CHANNEL  0    // EC signal on ADS1115 A0
 
 // Load cell counts per gram, from LoadCellCalibrate.ino. At 1.0 weight is raw counts.
-#define LOADCELL_SCALE  1.0f
+#define LOADCELL_SCALE  16950.12f
 
 #define WEIGHT_AVG_SAMPLES  5     // HX711 ~10 Hz, so weight = average of the last ~0.5 s
 #define EC_READ_MS        100     // read EC at 10 Hz (one ADS1115 read takes ~9 ms)
