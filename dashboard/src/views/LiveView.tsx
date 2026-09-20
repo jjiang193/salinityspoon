@@ -4,6 +4,7 @@ import { useApi } from '../hooks/useApi';
 import { href } from '../lib/route';
 import { MealHero } from '../components/MealHero';
 import { SensorStatus } from '../components/SensorStatus';
+import { LastBitePanel } from '../components/LastBitePanel';
 import { SalinityChart } from '../components/SalinityChart';
 import { TemperatureChart } from '../components/TemperatureChart';
 import { BiteTable } from '../components/BiteTable';
@@ -83,6 +84,9 @@ export function LiveView({ patientId, telemetry: t, spoonError }: {
                   mealName={t.mealLabel?.product_name ?? null}
                   volumeSource={t.bites[0]?.volume_source}
                   spoonSeen={t.spoonLive} />
+        {cloudMode ? (
+          <LastBitePanel bites={t.bites} />
+        ) : (
         <SensorStatus
           connected={t.connected}
           spoonLive={t.spoonLive}
@@ -96,6 +100,7 @@ export function LiveView({ patientId, telemetry: t, spoonError }: {
           lastDip={silentMidMeal || !t.connected ? null : t.lastDip}
           dipsNotCounted={t.dipsNotCounted}
         />
+        )}
       </div>
 
       <div className="grid two" style={{ marginTop: 16 }}>
