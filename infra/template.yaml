@@ -1,8 +1,9 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 Description: >
-  NaTrack phase 1 - the ingest spine.
-  Spoon -> IoT Core -> rule -> SQS -> ingestBite Lambda -> DynamoDB.
+  NaTrack phases 1-4 - ingest, live session, API, and the dashboard's hosting.
+  Spoon -> IoT Core -> rule -> SQS -> ingestBite Lambda -> DynamoDB,
+  and from there out to any clinician watching that patient over a WebSocket.
   Follows docs/natrack-system-design.pdf and docs/loadcell/aws-handoff.md;
   the message itself is bite/v2 from docs/telemetry-schema.md.
 
@@ -17,6 +18,17 @@ Parameters:
     Description: >
       Patient used when a device has no pairing item yet. Demo only -
       POST /v1/devices/{id}/pair writes the real one (phase 3).
+  SessionStageName:
+    Type: String
+    Default: live
+    Description: WebSocket API stage. It is in the URL clients connect to.
+  DashboardOrigin:
+    Type: String
+    Default: "*"
+    Description: >
+      Browser origin allowed to call the API. "*" is for local development
+      (vite on localhost); phase 4 sets the CloudFront domain, and the
+      reference sheet is explicit that CORS gets locked to the app's domain.
   BiteRetentionDays:
     Type: Number
     Default: 90
@@ -118,19 +130,27 @@ Resources:
           TELEMETRY_TABLE: !Ref TelemetryTable
           DEFAULT_PATIENT_ID: !Ref DefaultPatientId
           BITE_RETENTION_DAYS: !Ref BiteRetentionDays
+          WS_ENDPOINT: !Sub "https://${SessionApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${SessionStageName}"
       Policies:
-        # Least privilege on purpose: two actions, one table, no Patients table.
+        # Least privilege on purpose: the telemetry table only, never Patients.
+        # Query and DeleteItem are for the live session's connection book.
         - Statement:
             - Effect: Allow
-              Action: [dynamodb:PutItem, dynamodb:GetItem]
+              Action: [dynamodb:PutItem, dynamodb:GetItem, dynamodb:Query, dynamodb:DeleteItem]
               Resource: !GetAtt TelemetryTable.Arn
+            - Effect: Allow
+              Action: execute-api:ManageConnections
+              Resource: !Sub "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${SessionApi}/${SessionStageName}/POST/@connections/*" 
       Events:
         Bites:
           Type: SQS
           Properties:
             Queue: !GetAtt BiteIngestQueue.Arn
             BatchSize: 10
-            MaximumBatchingWindowInSeconds: 5
+            # 0, not 5: the batching window is pure latency on the live view,
+            # and a spoon sends one bite every few seconds at most. Batching
+            # earns its keep at 10k bites/s, not at one.
+            MaximumBatchingWindowInSeconds: 0
             FunctionResponseTypes: [ReportBatchItemFailures]
 
   # Health data: keep the logs short-lived and never log a payload (see app.py).
@@ -198,6 +218,457 @@ Resources:
               RoleArn: !GetAtt IoTRuleRole.Arn
               UseBase64: false
 
+  # --- Live session (phase 2) -------------------------------------------------
+  # NaTrack's live view: a clinician opens a socket for one patient and every
+  # new bite arrives as it lands. Best effort by design - the table is the
+  # source of truth, so a missed push never loses a bite.
+  #
+  # NaTrack writes this as wss://.../session/{patientId}. A WebSocket API routes
+  # on the message body, not the path, so the patient comes in as a query
+  # string: wss://<api>/<stage>?patientId=demo-1. Phase 4 can hide that behind
+  # a custom domain if the dashboard wants NaTrack's spelling exactly.
+  SessionApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub "${AWS::StackName}-session"
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: "$request.body.action"
+
+  SessionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-session"
+      CodeUri: session/
+      Handler: app.handler
+      Description: Records who is watching which patient's live session.
+      Environment:
+        Variables:
+          TELEMETRY_TABLE: !Ref TelemetryTable
+          CONNECTION_TTL_HOURS: 12
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:PutItem, dynamodb:GetItem, dynamodb:DeleteItem]
+              Resource: !GetAtt TelemetryTable.Arn
+
+  SessionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-session"
+      RetentionInDays: 14
+
+  # One integration serves all three routes: the function switches on routeKey.
+  SessionIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref SessionApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SessionFunction.Arn}/invocations"
+
+  ConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref SessionApi
+      RouteKey: $connect
+      AuthorizationType: NONE   # Cognito goes here in phase 3
+      Target: !Sub "integrations/${SessionIntegration}"
+
+  DisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref SessionApi
+      RouteKey: $disconnect
+      Target: !Sub "integrations/${SessionIntegration}"
+
+  DefaultRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref SessionApi
+      RouteKey: $default
+      Target: !Sub "integrations/${SessionIntegration}"
+
+  SessionInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SessionFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${SessionApi}/*"
+
+  SessionDeployment:
+    Type: AWS::ApiGatewayV2::Deployment
+    DependsOn: [ConnectRoute, DisconnectRoute, DefaultRoute]
+    Properties:
+      ApiId: !Ref SessionApi
+
+  SessionStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref SessionApi
+      DeploymentId: !Ref SessionDeployment
+      StageName: !Ref SessionStageName
+
+  # --- Who is asking (phase 3) ------------------------------------------------
+  # Two groups, as the design specifies: patients see themselves, clinicians see
+  # the patients assigned to them. The check itself lives in query/app.py -
+  # Cognito proves who you are, it does not decide what you may read.
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "${AWS::StackName}-users"
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      Schema:
+        - Name: patientId          # a patient's own id, read from their token
+          AttributeDataType: String
+          Mutable: true
+      Policies:
+        # Loose on purpose, and only defensible because every account in this
+        # pool is a demo account holding invented data. Real patients need the
+        # 12-character policy back, and MFA required rather than optional -
+        # both are one edit here, and the BAA checklist asks for them anyway.
+        PasswordPolicy:
+          MinimumLength: 6
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: false
+          RequireSymbols: false
+      # MFA for clinicians is what the reference sheet asks for. It is OPTIONAL
+      # here so a demo account can sign in without a phone, and turning it on is
+      # a console switch, not a redeploy.
+      MfaConfiguration: "OPTIONAL"
+      EnabledMfas: [SOFTWARE_TOKEN_MFA]
+
+  PatientGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: patient
+      UserPoolId: !Ref UserPool
+      Description: Sees their own data and nothing else.
+
+  ClinicianGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: clinician
+      UserPoolId: !Ref UserPool
+      Description: Sees the patients assigned to them.
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub "${AWS::StackName}-dashboard"
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false                 # a browser cannot keep a secret
+      ExplicitAuthFlows: [ALLOW_USER_PASSWORD_AUTH, ALLOW_REFRESH_TOKEN_AUTH]
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+      RefreshTokenValidity: 8
+      TokenValidityUnits: {AccessToken: hours, IdToken: hours, RefreshToken: hours}
+
+  # --- The API (phase 3) ------------------------------------------------------
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub "${AWS::StackName}-api"
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins: [!Ref DashboardOrigin]
+        AllowMethods: [GET, POST, PUT, DELETE, OPTIONS]
+        AllowHeaders: [authorization, content-type]
+        MaxAge: 600
+
+  # The authorizer proves the caller is someone. query/app.py decides whether
+  # that someone may see this patient.
+  JwtAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref HttpApi
+      AuthorizerType: JWT
+      IdentitySource: ["$request.header.Authorization"]
+      Name: cognito
+      JwtConfiguration:
+        Audience: [!Ref UserPoolClient]
+        Issuer: !Sub "https://cognito-idp.${AWS::Region}.${AWS::URLSuffix}/${UserPool}"
+
+  QueryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-query"
+      CodeUri: query/
+      Handler: app.handler
+      Timeout: 20
+      Description: NaTrack's /v1 endpoints, with the per-patient access check.
+      Environment:
+        Variables:
+          TELEMETRY_TABLE: !Ref TelemetryTable
+          PATIENTS_TABLE: !Ref PatientsTable
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:Query, dynamodb:GetItem]
+              Resource: !GetAtt TelemetryTable.Arn
+            - Effect: Allow
+              Action: [dynamodb:PutItem]
+              Resource: !GetAtt TelemetryTable.Arn   # device pairing only
+            # DeleteItem is for a self-reported meal the patient takes back,
+            # and for nothing else: bites are never deleted through the API.
+            - Effect: Allow
+              Action: [dynamodb:Query, dynamodb:GetItem, dynamodb:PutItem,
+                       dynamodb:UpdateItem, dynamodb:DeleteItem]
+              Resource: !GetAtt PatientsTable.Arn
+
+  QueryLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-query"
+      RetentionInDays: 14
+
+  QueryIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt QueryFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+  QueryInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref QueryFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*"
+
+  GetPatientsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /v1/patients"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${QueryIntegration}"
+
+  GetSummaryRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /v1/patients/{patientId}/summary"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${QueryIntegration}"
+
+  GetBitesRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /v1/patients/{patientId}/bites"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${QueryIntegration}"
+
+  PutTargetRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "PUT /v1/patients/{patientId}/target"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${QueryIntegration}"
+
+  PostHealthLogRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /v1/patients/{patientId}/health-log"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${QueryIntegration}"
+
+  GetHealthLogRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /v1/patients/{patientId}/health-log"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${QueryIntegration}"
+
+  PairDeviceRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /v1/devices/{deviceId}/pair"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${QueryIntegration}"
+
+  GetIntakeTodayRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/intake/today"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${QueryIntegration}"
+
+  GetSpoonRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/spoon"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${QueryIntegration}"
+
+  GetLabelClaimsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/label-claims"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${QueryIntegration}"
+
+  GetMealsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/meals"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${QueryIntegration}"
+
+  GetManualMealsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/manual-meals"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${QueryIntegration}"
+
+  PostManualMealRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/manual-meals"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${QueryIntegration}"
+
+  DeleteManualMealRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "DELETE /api/manual-meals/{entryId}"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${QueryIntegration}"
+
+  PostMealStartRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/meals/start"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${QueryIntegration}"
+
+  PostMealCloseRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/meals/close"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${QueryIntegration}"
+
+  PostMealLabelRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/meals/label"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${QueryIntegration}"
+
+  ApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: $default
+      AutoDeploy: true
+
+  # --- The dashboard (phase 4) ------------------------------------------------
+  # S3 behind CloudFront, as the design's first option. The bucket stays private
+  # and is reachable only through the distribution (origin access control), so
+  # there is no public bucket to leave open by accident - the last item on the
+  # reference sheet's watch list.
+  DashboardBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-dashboard-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
+
+  DashboardOac:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${AWS::StackName}-dashboard"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  DashboardDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "${AWS::StackName} dashboard"
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        PriceClass: PriceClass_100          # North America and Europe; a demo, not a product
+        Origins:
+          - Id: dashboard-bucket
+            DomainName: !GetAtt DashboardBucket.RegionalDomainName
+            S3OriginConfig: {}
+            OriginAccessControlId: !GetAtt DashboardOac.Id
+        DefaultCacheBehavior:
+          TargetOriginId: dashboard-bucket
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6          # Managed-CachingOptimized
+          ResponseHeadersPolicyId: 67f7725c-6f97-4210-82d7-5512b31e9d03 # Managed-SecurityHeadersPolicy
+        # The app routes in the browser, so a deep link is not a missing file.
+        # 403 as well as 404: with OAC, S3 says "forbidden" for a key that is
+        # not there rather than admitting it does not exist.
+        CustomErrorResponses:
+          - {ErrorCode: 403, ResponseCode: 200, ResponsePagePath: /index.html, ErrorCachingMinTTL: 10}
+          - {ErrorCode: 404, ResponseCode: 200, ResponsePagePath: /index.html, ErrorCachingMinTTL: 10}
+
+  DashboardBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DashboardBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: cloudfront.amazonaws.com}
+            Action: s3:GetObject
+            Resource: !Sub "${DashboardBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${DashboardDistribution}"
+
 Outputs:
   TelemetryTableName:
     Value: !Ref TelemetryTable
@@ -211,3 +682,20 @@ Outputs:
     Value: !Ref IngestBiteFunction
   DeviceTopic:
     Value: !Sub "devices/${DeviceId}/bites"
+  DashboardUrl:
+    Description: The dashboard. Sign in with the accounts seed-cloud.py makes.
+    Value: !Sub "https://${DashboardDistribution.DomainName}"
+  DashboardBucketName:
+    Value: !Ref DashboardBucket
+  DashboardDistributionId:
+    Value: !Ref DashboardDistribution
+  ApiUrl:
+    Description: NaTrack's /v1 endpoints. Needs a Cognito id token.
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}"
+  UserPoolId:
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Value: !Ref UserPoolClient
+  SessionUrl:
+    Description: Connect here with ?patientId=<id> to watch a patient's bites live.
+    Value: !Sub "wss://${SessionApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${SessionStageName}"

@@ -4,6 +4,8 @@
  * Storage is UTC; a "day" is the viewer's day. Without this a 9 pm dinner in
  * New York lands in tomorrow's total (PLAN.md §7).
  */
+import { apiUrl, authHeaders } from './cloud';
+
 const TZ_OFFSET_MIN = -new Date().getTimezoneOffset();
 
 function withTz(path: string): string {
@@ -35,7 +37,7 @@ export class ApiError extends Error {
 }
 
 export async function getJson<T>(path: string): Promise<T> {
-  const res = await reach(fetch(withTz(path)));
+  const res = await reach(fetch(apiUrl(withTz(path)), { headers: authHeaders() }));
   if (!res.ok) throw new ApiError(failure(res.status), res.status);
   return res.json();
 }
@@ -43,9 +45,11 @@ export async function getJson<T>(path: string): Promise<T> {
 export async function sendJson<T>(
   method: 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown,
 ): Promise<T> {
-  const res = await reach(fetch(path, {
+  const res = await reach(fetch(apiUrl(path), {
     method,
-    headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+    headers: body === undefined
+      ? authHeaders()
+      : { 'Content-Type': 'application/json', ...authHeaders() },
     body: body === undefined ? undefined : JSON.stringify(body),
   }));
   if (!res.ok) {

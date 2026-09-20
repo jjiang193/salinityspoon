@@ -1,4 +1,4 @@
-# NaTrack on AWS — phase 1, the ingest spine
+# NaTrack on AWS — phases 1–4: ingest, live session, API, dashboard
 
 What `docs/natrack-system-design.pdf` calls ingest, as far as the durable write:
 
@@ -7,9 +7,28 @@ spoon ──MQTT/TLS──► IoT Core ──rule──► SQS ──► Lambda 
        cert per device   devices/+/bites   bite-ingest   validate, dedupe   telemetry
 ```
 
-Later phases (not here): the API Gateway WebSocket live push, Cognito and the
-`/v1/...` API, the dashboard on Amplify, then hardening (KMS CMK, private
-subnets, Streams → `MealSummary`, S3 archive, CloudTrail).
+…and from the table out to anyone watching that patient live:
+
+```
+ingestBite ──► API Gateway WebSocket ──► clinician's browser
+               wss://<api>/live?patientId=demo-1
+```
+
+…and read back through NaTrack's endpoints, behind Cognito:
+
+```
+browser ──Cognito id token──► HTTP API ──► query Lambda ──► DynamoDB
+          GET /v1/patients, /v1/patients/{id}/summary, …
+```
+
+…and the dashboard itself, on S3 behind CloudFront:
+
+```
+https://<distribution>.cloudfront.net   the React app, signed in through Cognito
+```
+
+Later phases (not here): hardening (KMS CMK, private subnets, Streams → `MealSummary`, S3
+archive, CloudTrail).
 
 The message is `bite/v2`, defined in `docs/telemetry-schema.md`. That file is
 the contract; this stack is plumbing around it. `docs/loadcell/aws-handoff.md`
@@ -20,7 +39,12 @@ maps the firmware's struct onto it.
 | File | |
 |---|---|
 | `template.yaml` | The stack: two tables, queue + dead-letter queue, the Lambda, the thing, its policy, the topic rule |
-| `ingest/app.py` | `ingestBite` — the cloud twin of `backend/app/main.py:_handle_bite` |
+| `ingest/app.py` | `ingestBite` — the cloud twin of `backend/app/main.py:_handle_bite`, and the live push |
+| `session/app.py` | The live session's connection book: who is watching which patient |
+| `query/app.py` | NaTrack's `/v1` endpoints, and the per-patient access check |
+| `scripts/seed-cloud.py` | The demo patient, the clinician assignment and two Cognito users |
+| `scripts/deploy-dashboard.sh` | Builds the dashboard against this stack and ships it to CloudFront |
+| `scripts/watch-session.py` | Watches a patient's session from the terminal, as the dashboard will |
 | `test_validate.py` | The refusal rules, no AWS needed: `python3 infra/test_validate.py` |
 | `sample-bite.json` | The load-cell spoon's bite, from the handoff doc |
 | `scripts/create-device-cert.sh` | The spoon's certificate (CLI-only: the key is shown once) |
@@ -58,6 +82,124 @@ sam logs -n ingestBite --stack-name natrack --tail --profile natrack
 
 A refused bite logs `bite refused (...): 44.8 C outside probe range 0.0-40.0 C`
 and stores nothing. A replay logs `stored=False`.
+
+## The live session
+
+```bash
+python3 infra/scripts/watch-session.py demo-1     # leave this open
+infra/scripts/publish-test-bite.sh                # in another terminal
+```
+
+The bite should appear in the watcher about a second after it is published.
+Measured on the deployed stack: published 07:59:52, on screen 07:59:53.
+
+That second is mostly Lambda. The first version of this stack batched SQS
+messages for up to 5 s and took **22 s** end to end; `MaximumBatchingWindowInSeconds`
+is 0 because the window is pure latency on the live view and a spoon sends one
+bite every few seconds at most. Batching earns its keep at 10k bites/s, not at
+one — turn it back up if that day arrives.
+
+**The patient is a query string, not a path.** NaTrack writes the live view as
+`wss://.../session/{patientId}`, but a WebSocket API routes on the message body
+and cannot take a path parameter, so it is `?patientId=demo-1` instead. Phase 4
+can put NaTrack's spelling back with a custom domain if the dashboard wants it.
+
+**The push is best effort, and after the write.** The table is the source of
+truth; a bite nobody was watching is not a bite that was lost. A failed push is
+logged and dropped rather than retried — the bite is already durable, and a
+retry would only delay the next one. A replay is never pushed twice, because
+the write is what decides whether anything is new.
+
+**Connections are rows with a TTL.** `SESSION#<patientId>` / `CONN#<id>` says
+who is listening, `CONN#<id>` / `SESSION` says which patient a socket joined,
+because `$disconnect` is told nothing but the connection id. A socket API
+Gateway forgot to close expires in 12 hours instead of being pushed to for ever;
+one that has already gone (`GoneException`) is deleted on the spot.
+
+**No auth yet.** `$connect` takes any `patientId`, which is fine for a stack
+holding synthetic demo data and is not fine for real patients. Cognito on the
+`$connect` route is phase 3, together with the `canAccess` check the reference
+sheet calls the biggest real risk.
+
+## The API
+
+```bash
+python3 infra/scripts/seed-cloud.py          # once, after deploying
+```
+
+It prints a password for `patient@natrack.invalid` and `clinician@natrack.invalid`
+(synthetic people; `.invalid` never resolves, by RFC 2606). Then:
+
+```bash
+API=$(aws cloudformation describe-stacks --stack-name natrack \
+  --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text)
+CLIENT=$(aws cloudformation describe-stacks --stack-name natrack \
+  --query "Stacks[0].Outputs[?OutputKey=='UserPoolClientId'].OutputValue" --output text)
+TOKEN=$(aws cognito-idp initiate-auth --auth-flow USER_PASSWORD_AUTH \
+  --client-id "$CLIENT" --auth-parameters USERNAME=clinician@natrack.invalid,PASSWORD='…' \
+  --query 'AuthenticationResult.IdToken' --output text)
+curl -H "Authorization: Bearer $TOKEN" "$API/v1/patients?tz_offset_min=-240"
+```
+
+**`canAccess` is the whole security story.** Cognito proves *who* is asking;
+`query/app.py` decides whether they may see *this patient*. A patient's own id
+comes from their token (`custom:patientId`) and never from the request; a
+clinician must have an assignment row. Both were tested against the deployed
+stack:
+
+| | |
+|---|---|
+| No token | 401, before the Lambda runs |
+| Patient reading themselves | 200 |
+| Patient reading another patient | **404** — the same answer as a patient who does not exist, because confirming which ids are real is itself a leak |
+| Patient setting a sodium target | **403** — the reference sheet is explicit that targets are the clinician's |
+| `systolic: 400` | 400, "must be between 60 and 260" |
+
+**A clinician is identified by their verified email**, not `cognito:username`:
+the pool signs in by email, so the username is a UUID nobody can write an
+assignment against by hand.
+
+**Meals are derived on read**, by the contract's 20-minute rule, rather than
+read from `MealSummary` rows — phase 5 moves that to Streams, as the design
+specifies. The numbers are the same; the work happens on the way out instead of
+on the way in.
+
+**What the cloud does not have**, and the dashboard will show as blanks: meal
+labels and the label check, self-reported food, the recording controls, and the
+rest of the local backend's `/api` surface. The local backend is still the full
+article.
+
+## The dashboard
+
+```bash
+infra/scripts/deploy-dashboard.sh
+```
+
+The API URL, the socket URL and the Cognito client id come from the stack's
+outputs, so there is nothing to paste and nothing to drift.
+
+**One codebase, two deployments.** With none of the `VITE_*` variables set, the
+dashboard is origin-relative and talks to the local backend through Vite's
+proxy, with no sign-in at all — that is still the demo path, and it did not
+change. Given them, the same build talks to AWS and every request carries a
+Cognito id token.
+
+**The token is held in memory only.** It is not PHI, but it opens PHI, and the
+reference sheet's rule for that family is no `localStorage`. A reload asks
+again, which is the right trade for a laptop on a ward.
+
+**The bucket is private.** CloudFront reaches it through an origin access
+control; there is no public bucket to leave open, which is the last item on the
+reference sheet's watch list. Deep links work because 403 and 404 both return
+`index.html` — with OAC, S3 says "forbidden" for a key that is not there rather
+than admitting it does not exist.
+
+**CORS is locked to the distribution.** `DashboardOrigin` defaults to `*` for
+local development and is set to the CloudFront domain on deploy; a preflight
+from any other origin gets no `access-control-allow-origin` back at all.
+
+`index.html` is uploaded with `no-cache` and the hashed assets with a year, so a
+browser can never hold last week's app against this week's API.
 
 ## Decisions worth knowing
 
@@ -122,6 +264,8 @@ Lambda, IoT Core. A `natrack-monthly` budget alerts at $20.
   the stack without hardware.
 - The device certificate is created by `scripts/create-device-cert.sh`, not by
   the stack. Keys stay in `~/natrack-certs/`, never in git.
-- `MealSummary` rows, the live WebSocket, the REST API and Cognito are phases
-  2–5. The local backend keeps serving the demo meanwhile, exactly as
-  `HANDOFF.md` intends.
+- `MealSummary` rows and the hardening pass are phase 5. The local backend
+  keeps serving the demo meanwhile, exactly as `HANDOFF.md` intends.
+- The live session is unauthenticated, and `meal_totals` / `label_check` are not
+  in the pushed message: the cloud has no meal grouping until `MealSummary`
+  (phase 5). The local backend's session message carries both.
