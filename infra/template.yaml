@@ -1,8 +1,9 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 Description: >
-  NaTrack phase 1 - the ingest spine.
-  Spoon -> IoT Core -> rule -> SQS -> ingestBite Lambda -> DynamoDB.
+  NaTrack phases 1-2 - the ingest spine and the live session.
+  Spoon -> IoT Core -> rule -> SQS -> ingestBite Lambda -> DynamoDB,
+  and from there out to any clinician watching that patient over a WebSocket.
   Follows docs/natrack-system-design.pdf and docs/loadcell/aws-handoff.md;
   the message itself is bite/v2 from docs/telemetry-schema.md.
 
@@ -17,6 +18,10 @@ Parameters:
     Description: >
       Patient used when a device has no pairing item yet. Demo only -
       POST /v1/devices/{id}/pair writes the real one (phase 3).
+  SessionStageName:
+    Type: String
+    Default: live
+    Description: WebSocket API stage. It is in the URL clients connect to.
   BiteRetentionDays:
     Type: Number
     Default: 90
@@ -118,19 +123,27 @@ Resources:
           TELEMETRY_TABLE: !Ref TelemetryTable
           DEFAULT_PATIENT_ID: !Ref DefaultPatientId
           BITE_RETENTION_DAYS: !Ref BiteRetentionDays
+          WS_ENDPOINT: !Sub "https://${SessionApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${SessionStageName}"
       Policies:
-        # Least privilege on purpose: two actions, one table, no Patients table.
+        # Least privilege on purpose: the telemetry table only, never Patients.
+        # Query and DeleteItem are for the live session's connection book.
         - Statement:
             - Effect: Allow
-              Action: [dynamodb:PutItem, dynamodb:GetItem]
+              Action: [dynamodb:PutItem, dynamodb:GetItem, dynamodb:Query, dynamodb:DeleteItem]
               Resource: !GetAtt TelemetryTable.Arn
+            - Effect: Allow
+              Action: execute-api:ManageConnections
+              Resource: !Sub "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${SessionApi}/${SessionStageName}/POST/@connections/*" 
       Events:
         Bites:
           Type: SQS
           Properties:
             Queue: !GetAtt BiteIngestQueue.Arn
             BatchSize: 10
-            MaximumBatchingWindowInSeconds: 5
+            # 0, not 5: the batching window is pure latency on the live view,
+            # and a spoon sends one bite every few seconds at most. Batching
+            # earns its keep at 10k bites/s, not at one.
+            MaximumBatchingWindowInSeconds: 0
             FunctionResponseTypes: [ReportBatchItemFailures]
 
   # Health data: keep the logs short-lived and never log a payload (see app.py).
@@ -198,6 +211,96 @@ Resources:
               RoleArn: !GetAtt IoTRuleRole.Arn
               UseBase64: false
 
+  # --- Live session (phase 2) -------------------------------------------------
+  # NaTrack's live view: a clinician opens a socket for one patient and every
+  # new bite arrives as it lands. Best effort by design - the table is the
+  # source of truth, so a missed push never loses a bite.
+  #
+  # NaTrack writes this as wss://.../session/{patientId}. A WebSocket API routes
+  # on the message body, not the path, so the patient comes in as a query
+  # string: wss://<api>/<stage>?patientId=demo-1. Phase 4 can hide that behind
+  # a custom domain if the dashboard wants NaTrack's spelling exactly.
+  SessionApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub "${AWS::StackName}-session"
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: "$request.body.action"
+
+  SessionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-session"
+      CodeUri: session/
+      Handler: app.handler
+      Description: Records who is watching which patient's live session.
+      Environment:
+        Variables:
+          TELEMETRY_TABLE: !Ref TelemetryTable
+          CONNECTION_TTL_HOURS: 12
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:PutItem, dynamodb:GetItem, dynamodb:DeleteItem]
+              Resource: !GetAtt TelemetryTable.Arn
+
+  SessionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-session"
+      RetentionInDays: 14
+
+  # One integration serves all three routes: the function switches on routeKey.
+  SessionIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref SessionApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SessionFunction.Arn}/invocations"
+
+  ConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref SessionApi
+      RouteKey: $connect
+      AuthorizationType: NONE   # Cognito goes here in phase 3
+      Target: !Sub "integrations/${SessionIntegration}"
+
+  DisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref SessionApi
+      RouteKey: $disconnect
+      Target: !Sub "integrations/${SessionIntegration}"
+
+  DefaultRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref SessionApi
+      RouteKey: $default
+      Target: !Sub "integrations/${SessionIntegration}"
+
+  SessionInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SessionFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${SessionApi}/*"
+
+  SessionDeployment:
+    Type: AWS::ApiGatewayV2::Deployment
+    DependsOn: [ConnectRoute, DisconnectRoute, DefaultRoute]
+    Properties:
+      ApiId: !Ref SessionApi
+
+  SessionStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref SessionApi
+      DeploymentId: !Ref SessionDeployment
+      StageName: !Ref SessionStageName
+
 Outputs:
   TelemetryTableName:
     Value: !Ref TelemetryTable
@@ -211,3 +314,6 @@ Outputs:
     Value: !Ref IngestBiteFunction
   DeviceTopic:
     Value: !Sub "devices/${DeviceId}/bites"
+  SessionUrl:
+    Description: Connect here with ?patientId=<id> to watch a patient's bites live.
+    Value: !Sub "wss://${SessionApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${SessionStageName}"

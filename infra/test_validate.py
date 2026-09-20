@@ -19,7 +19,12 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent / "ingest"))
 if "boto3" not in sys.modules:
     boto3 = types.ModuleType("boto3")
     boto3.resource = mock.MagicMock()
+    boto3.client = mock.MagicMock()
     sys.modules["boto3"] = boto3
+    conditions = types.ModuleType("boto3.dynamodb.conditions")
+    conditions.Key = mock.MagicMock()
+    sys.modules["boto3.dynamodb"] = types.ModuleType("boto3.dynamodb")
+    sys.modules["boto3.dynamodb.conditions"] = conditions
     exceptions = types.ModuleType("botocore.exceptions")
     exceptions.ClientError = type("ClientError", (Exception,), {})
     sys.modules["botocore"] = types.ModuleType("botocore")
