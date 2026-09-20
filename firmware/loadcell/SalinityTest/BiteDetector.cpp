@@ -1,17 +1,19 @@
 /*
- * BiteDetector.cpp - bite state machine. Rules and thresholds are in BiteDetector.h.
+ * BiteDetector.cpp - the bite state machine. Rules and thresholds are in BiteDetector.h.
  *
- * EMPTY -> LOADED -> DIPPING -> MEASURED -> EMPTY(bite)
+ *   EMPTY -> FILLING -> LOADED -> DIPPING -> MEASURED -> EMPTY (bite logged)
  *
- * The one rule that shapes everything below: the load cell is only believable
- * while the probe is out of the spoon. Weight is measured in LOADED, frozen
- * through DIPPING, and believed again in MEASURED.
+ * Everything below follows from three latches: the weight is latched once the
+ * food has been sitting there for LOAD_SETTLE_MS, the salinity is latched when
+ * a dip ends, and the bite is only logged once the bowl has been empty for
+ * EMPTY_HOLD_MS. Between those moments the sensors can say whatever they like.
  */
 #include "BiteDetector.h"
+#include "Salinity.h"
 #include <math.h>
 
-enum State { EMPTY, LOADED, DIPPING, MEASURED };
-static const char *STATE_NAMES[] = { "EMPTY", "LOADED", "DIPPING", "MEASURED" };
+enum State { EMPTY, FILLING, LOADED, DIPPING, MEASURED };
+static const char *STATE_NAMES[] = { "EMPTY", "FILLING", "LOADED", "DIPPING", "MEASURED" };
 static State    state = EMPTY;
 static uint32_t nextBiteId = 1;
 
@@ -24,39 +26,35 @@ static bool  haveMpu;                      // no MPU = no tilt correction, quali
 
 // ---------- Tilt tracking ----------
 static float up[3];                        // "up" now (unit vector)
-static unsigned long lastMs;               // time of the last tilt update
+static unsigned long lastMs;
 
 // ---------- Temperature settling ----------
-static float         tempRef;              // temp when the settle timer last restarted
+static float         tempRef;
 static unsigned long tempRefAt;
 
-// ---------- The scoop (weighed while the probe is out) ----------
-// Rolling window of the last SNAP_SAMPLES weights.
+// ---------- The scoop ----------
+// A plain rolling mean: the latched weight is the average of the last half
+// second, taken once the food has been sitting there long enough to be real.
 struct WeightWindow {
-  float w[SNAP_SAMPLES];
+  float w[LATCH_SAMPLES];
   int idx, count;
   void clear() { idx = count = 0; }
   void add(float g) {
     w[idx] = g;
-    idx = (idx + 1) % SNAP_SAMPLES;
-    if (count < SNAP_SAMPLES) count++;
+    idx = (idx + 1) % LATCH_SAMPLES;
+    if (count < LATCH_SAMPLES) count++;
   }
-  bool full() const { return count == SNAP_SAMPLES; }
+  bool full() const { return count == LATCH_SAMPLES; }
   float avg() const { float s = 0; for (int i = 0; i < count; i++) s += w[i]; return s / count; }
-  bool steady() const {                    // stayed within +/-5% of its own mean
-    float lo = w[0], hi = w[0];
-    for (int i = 1; i < count; i++) { lo = fminf(lo, w[i]); hi = fmaxf(hi, w[i]); }
-    return hi - lo <= SCOOP_SPREAD_FRAC * avg();
-  }
 };
-static WeightWindow scoopWin;
-static float loadedG;                    // the scoop, latched. 0 = nothing weighed yet
-static bool  loadedStill;                  // that weight came from a steady, still, level window
-static float peakDryG;                     // heaviest reading seen with the probe out, this scoop
-static unsigned long weightTrustedAt;      // before this, the load cell is still flushing the probe
+static WeightWindow  weightWin;
+static unsigned long loadedSince;          // when the weight first came up (0 = it has not)
+static float         loadedG;              // the scoop, latched. 0 = nothing latched yet
+static bool          loadedStill;          // latched while the spoon was still and level
+static unsigned long weightTrustedAt;      // before this, the load cell is still flushing a lifted probe
 
-// ---------- The dip (probe in the spoon) ----------
-// Only the tail is kept: the probe arrives from room air and the EC reading is
+// ---------- The dip ----------
+// Only the tail is kept: the probes arrive from room air and the EC reading is
 // compensated with a temperature that is still climbing, so early samples
 // describe a food that does not exist.
 struct DipWindow {
@@ -81,23 +79,22 @@ struct DipWindow {
   float medianEc() const { return median(ec, count); }
   float medianTemp() const { return median(temp, count); }
 };
-static DipWindow    dipWin;
+static DipWindow     dipWin;
 static unsigned long lastDipSampleAt;
 static unsigned long drySince;             // when EC first fell below DRY_MV (0 = not)
 
 // ---------- The measurement this scoop is carrying ----------
+// Latched: taking the probes out does not touch it. Only a new dip replaces it.
 static float measSalinity, measTemp;
 static int   measSamples;
 static bool  measTempSettled;
 static bool  haveMeasurement;
-// The last dip of the session, for a spoonful eaten without one. Same bowl.
-static float lastSalinity, lastTemp;
-static bool  haveLastSalinity;
 
-// ---------- Food leaving ----------
+// ---------- Emptying ----------
 static unsigned long emptySince;           // when the weight fell below EMPTY_FRACTION (0 = not)
+static float         pourTilt;             // peak tilt since the food was last plainly there
 static unsigned long heavySince;           // when it rose above the scoop + TOPUP_G (0 = not)
-static bool outOfRange;                    // this scoop failed the interlock: record nothing
+static bool          outOfRange;           // this spoonful failed the interlock: record nothing
 
 // ================= Helpers =================
 
@@ -108,7 +105,7 @@ static float gyroMag(const SensorReadings &r) {
 }
 
 // Without an MPU there is no motion evidence either way. Treat the spoon as
-// level and still, and let loadedStill carry the doubt into the sodium range.
+// level and still, and let heldStill carry the doubt into the sodium range.
 static bool isStill(const SensorReadings &r) {
   if (!haveMpu || !r.mpuOk) return true;
   return gyroMag(r) < STILL_GYRO_RAD_S && fabsf(accelMag(r) - gravityRef) < STILL_ACCEL_DEV;
@@ -128,15 +125,16 @@ static float tiltDeg() {
 }
 static bool isLevel() { return tiltDeg() <= LEVEL_MAX_DEG; }
 
-// Weight minus zero, corrected for small tilts (load cell only feels gravity along its axis).
-// Capped at LEVEL_MAX_DEG: the weight average lags a fast tilt, so more would over-read.
+// Weight minus zero, corrected for small tilts (the load cell only feels gravity
+// along its axis). Capped at LEVEL_MAX_DEG: the weight average lags a fast tilt,
+// so more correction would over-read.
 static float netWeight(const SensorReadings &r) {
   float t = fminf(tiltDeg(), LEVEL_MAX_DEG);
   return (r.weightG - zeroG) / cosf(t * PI / 180.0f);
 }
 
-// Track "up": rotate it with the gyro, then nudge it toward gravity from the accelerometer
-// so it can't drift. Accel alone reads tilt wrong while the spoon accelerates.
+// Track "up": rotate it with the gyro, then nudge it toward gravity from the
+// accelerometer so it cannot drift. Accel alone reads tilt wrong while moving.
 static void updateTilt(const SensorReadings &r, unsigned long now) {
   float dt = constrain((now - lastMs) / 1000.0f, 0.0f, 0.1f);
   lastMs = now;
@@ -156,85 +154,59 @@ static void updateTilt(const SensorReadings &r, unsigned long now) {
   for (int i = 0; i < 3; i++) up[i] = p[i] / n;
 }
 
-// Weigh the food while the probe is out. Only a steady, still, level window is
-// allowed to set the scoop weight; anything else leaves the last one standing.
-static void weighScoop(const SensorReadings &r, float w) {
-  if (isStill(r) && isLevel()) {
-    scoopWin.add(w);
-    if (scoopWin.full() && scoopWin.steady()) {
-      loadedG = scoopWin.avg();
-      loadedStill = haveMpu && r.mpuOk;
-    }
-  } else {
-    scoopWin.clear();
-  }
-  // Nobody held it still: fall back to the heaviest reading seen with the probe
-  // out. The load cell average climbs toward the true weight after a scoop, so
-  // the first reading over 4 g is the start of that climb, not the food - and a
-  // later lighter one means some food already left, which still counts when the
-  // rest goes.
-  peakDryG = fmaxf(peakDryG, w);
-  if (!loadedStill && peakDryG >= MIN_SCOOP_G) {
-    loadedG = peakDryG;
-    loadedStill = false;
-  }
-}
-
-// sodium mg = salinity x salt mg per g per mS/cm x grams x sodium share of salt
+// The team's curve (Salinity.h), not a flat factor: EC -> g/L -> mg sodium.
+// The backend recomputes this from salinityIndex and weightGrams, so the two
+// must agree about the same bite.
 static void estimateSodium(Bite &b) {
   float range = SODIUM_RANGE_FRAC + (b.heldStill ? 0 : SODIUM_RANGE_EXTRA)
-                                  + (b.tempSettled ? 0 : SODIUM_RANGE_EXTRA)
-                                  + (b.salinityCarried ? SODIUM_RANGE_CARRIED : 0);
-  b.sodiumMg     = fmaxf(b.salinityMsCm, 0.0f) * NACL_MG_PER_G_PER_MS * fmaxf(b.weightG, 0.0f) * SODIUM_PER_NACL;
+                                  + (b.tempSettled ? 0 : SODIUM_RANGE_EXTRA);
+  b.salinityGPerL = ecToGPerLitre(fmaxf(b.salinityMsCm, 0.0f));
+  b.sodiumMg      = sodiumMgFrom(b.salinityGPerL, b.weightG);
   b.sodiumLowMg  = b.sodiumMg * (1.0f - range);
   b.sodiumHighMg = b.sodiumMg * (1.0f + range);
 }
 
-// Start a fresh scoop: everything about the last one is gone except the soup
-// it was made of, which the next spoonful is still made of too.
+// Start a fresh spoonful. The measurement goes with it: a new scoop has not
+// been dipped yet, whatever the last one read.
 static void resetScoop() {
-  scoopWin.clear();
+  weightWin.clear();
   dipWin.clear();
+  loadedSince = 0;
   loadedG = 0;
-  peakDryG = 0;
   loadedStill = false;
   haveMeasurement = false;
   emptySince = 0;
+  pourTilt = 0;
   drySince = 0;
   heavySince = 0;
   outOfRange = false;
   weightTrustedAt = 0;
 }
 
-// The weight has fallen away and stayed down. Report what was eaten.
-// Returns false only when there is no salinity to report it with.
-static bool emitBite(float leftoverW, unsigned long now, Bite &out) {
-  if (outOfRange) return false;            // the interlock already refused this scoop
-  out = Bite{};
-  out.salinityCarried = !haveMeasurement;
-  if (haveMeasurement) {
-    out.salinityMsCm = measSalinity;
-    out.tempC        = measTemp;
-    out.dipSamples   = measSamples;
-    out.tempSettled  = measTempSettled;
-  } else {
-#if CARRY_SALINITY
-    if (!haveLastSalinity) return false;
-    out.salinityMsCm = lastSalinity;
-    out.tempC        = lastTemp;
-    out.dipSamples   = 0;
-    out.tempSettled  = false;
-#else
-    return false;
-#endif
-  }
+// Latch the scoop: the mean of the last half second, plus whether the spoon was
+// behaving while that was taken.
+static void latchWeight(const SensorReadings &r) {
+  loadedG = weightWin.avg();
+  loadedStill = haveMpu && r.mpuOk && isStill(r) && isLevel();
+}
 
-  out.biteId    = nextBiteId++;
-  out.ms        = now;
-  out.heldStill = loadedStill;
-  out.loadedG   = loadedG;
-  out.leftoverG = fmaxf(leftoverW, 0.0f);
-  out.weightG   = fmaxf(out.loadedG - out.leftoverG, 0.0f);
+// The bowl has been empty long enough. Report what left it.
+// Never returns false: a spoonful that was weighed is a bite even if nobody
+// dipped the probes, and then it carries salinity 0 and says so.
+static bool emitBite(float leftoverW, unsigned long now, Bite &out) {
+  out = Bite{};
+  out.biteId          = nextBiteId++;
+  out.ms              = now;
+  out.salinityMeasured = haveMeasurement;
+  out.salinityMsCm    = haveMeasurement ? measSalinity : 0.0f;
+  out.tempC           = haveMeasurement ? measTemp : NAN;
+  out.dipSamples      = haveMeasurement ? measSamples : 0;
+  out.tempSettled     = haveMeasurement && measTempSettled;
+  out.heldStill       = loadedStill;
+  out.pourTiltDeg     = pourTilt;
+  out.loadedG         = loadedG;
+  out.leftoverG       = fmaxf(leftoverW, 0.0f);
+  out.weightG         = fmaxf(out.loadedG - out.leftoverG, 0.0f);
   estimateSodium(out);
   return true;
 }
@@ -249,7 +221,7 @@ void biteBegin() {
     float aMin = 1e9f, aMax = 0, gMin[3] = { 1e9f, 1e9f, 1e9f }, gMax[3] = { -1e9f, -1e9f, -1e9f };
     for (int k = 0; k < 3; k++) aSum[k] = gSum[k] = 0;
 
-    for (int i = 0; i < SNAP_SAMPLES; i++) {
+    for (int i = 0; i < LATCH_SAMPLES; i++) {
       sensorsUpdate();
       const SensorReadings &s = sensorsLatest();
       float a[3] = { s.ax, s.ay, s.az }, g[3] = { s.gx, s.gy, s.gz };
@@ -270,11 +242,11 @@ void biteBegin() {
   zeroG = r.weightG;                                    // already a 0.5 s average
   haveMpu = r.mpuOk;
   if (haveMpu) {
-    gravityRef = mag(aSum[0], aSum[1], aSum[2]) / SNAP_SAMPLES;
-    float n = gravityRef * SNAP_SAMPLES;
+    gravityRef = mag(aSum[0], aSum[1], aSum[2]) / LATCH_SAMPLES;
+    float n = gravityRef * LATCH_SAMPLES;
     for (int k = 0; k < 3; k++) {
       level[k] = up[k] = aSum[k] / n;
-      gyroBias[k] = gSum[k] / SNAP_SAMPLES;
+      gyroBias[k] = gSum[k] / LATCH_SAMPLES;
     }
     Serial.printf("At rest: gravity %.2f m/s^2, gyro offset %.2f %.2f %.2f rad/s\n",
                   gravityRef, gyroBias[0], gyroBias[1], gyroBias[2]);
@@ -283,7 +255,6 @@ void biteBegin() {
   }
   lastMs = tempRefAt = millis();
   tempRef = r.tempC;
-  haveLastSalinity = false;
   resetScoop();
   state = EMPTY;
 }
@@ -295,44 +266,66 @@ bool biteUpdate(const SensorReadings &r, unsigned long now, Bite &out) {
     tempRefAt = now;
   }
 
-  // The load cell and the EC probe are the two signals a bite cannot be made
-  // without. The MPU only grades it.
-  if (!r.scaleOk || !r.adsOk) return false;
+  // The load cell is the one sensor a bite cannot be made without. A missing EC
+  // probe costs the salinity, not the bite.
+  if (!r.scaleOk) return false;
   updateTilt(r, now);
   float w = netWeight(r);
 
+  // Watch the tipping every loop, not only where the weight is read. A pour
+  // that starts the moment the probes lift happens inside WEIGHT_TRUST_MS, and
+  // by the time the load cell is believed again the bowl is level once more -
+  // the tip would be missed and a real bite refused. The peak is cleared below,
+  // whenever the food is plainly still there.
+  if (state == LOADED || state == MEASURED) pourTilt = fmaxf(pourTilt, tiltDeg());
+
   switch (state) {
     // ---------------- EMPTY ----------------
+    // Nothing in the bowl. Follow the load cell's slow drift so tomorrow's zero
+    // is still today's.
     case EMPTY:
-      if (isStill(r) && fabsf(w) < MIN_SCOOP_G) zeroG += (r.weightG - zeroG) * 0.005f;  // follow drift
+      if (isStill(r) && fabsf(w) < MIN_SCOOP_G) zeroG += (r.weightG - zeroG) * 0.005f;
       if (w >= MIN_SCOOP_G) {
         resetScoop();
+        loadedSince = now;
+        weightWin.add(w);
+        state = FILLING;
+      }
+      return false;
+
+    // ---------------- FILLING ----------------
+    // Food is going in. Do not believe any of it yet: pouring takes a moment and
+    // the load cell's average is chasing it. Wait LOAD_SETTLE_MS, then latch.
+    case FILLING:
+      if (w < MIN_SCOOP_G) {                   // taken straight back out
+        state = EMPTY;
+        return false;
+      }
+      weightWin.add(w);
+      if (now - loadedSince >= LOAD_SETTLE_MS && weightWin.full()) {
+        latchWeight(r);
+        Serial.printf("--- Loaded %.1f g%s. Dip the probes in to measure.\n",
+                      loadedG, loadedStill ? "" : " (moving, so the range is wider)");
         state = LOADED;
       }
       return false;
 
     // ---------------- LOADED ----------------
-    // Food on the spoon, probe not in it yet. Weigh it, and wait for the dip.
+    // Weight latched, waiting for the dip. Nothing here changes loadedG: more
+    // food is a re-latch (below), less food is the bowl emptying (below).
     case LOADED:
-      if (now < weightTrustedAt) return false;    // load cell still flushing a lifted probe
-      weighScoop(r, w);
-
-      if (isWet(r) && loadedG >= MIN_SCOOP_G) {   // probe going in: freeze the weight
+      if (isWet(r)) {                          // probes going in
         dipWin.clear();
         lastDipSampleAt = now - DIP_SAMPLE_MS;
         drySince = 0;
         state = DIPPING;
         return false;
       }
-      if (w < MIN_SCOOP_G && loadedG <= 0.0f) {   // put down before anything was weighed
-        state = EMPTY;
-        return false;
-      }
-      break;                                       // shared weight-drop check below
+      break;                                   // shared checks below
 
     // ---------------- DIPPING ----------------
-    // The probe is resting in the spoon, so the load cell is reading the probe
-    // too. Weight is frozen: nothing it does here ends a bite or moves loadedG.
+    // The probes are resting in the food, so the load cell is reading them too.
+    // Weight is frozen: nothing it does here ends a bite or moves loadedG.
     case DIPPING: {
       if (isWet(r) && now - lastDipSampleAt >= DIP_SAMPLE_MS) {
         dipWin.add(r.ecMsCm, r.tempC);
@@ -340,39 +333,34 @@ bool biteUpdate(const SensorReadings &r, unsigned long now, Bite &out) {
         drySince = 0;
       } else if (isDry(r)) {
         if (!drySince) drySince = now;
-        if (now - drySince >= DRY_HOLD_MS) {       // probe is out: close the dip
+        if (now - drySince >= DRY_HOLD_MS) {   // probes are out: close the dip
           float dipTemp = dipWin.medianTemp();
-          if (!tempInRange(dipTemp) && dipWin.total >= MIN_DIP_SAMPLES) {
+          if (dipWin.total < MIN_DIP_SAMPLES) {
+            Serial.printf("[WARN] Dip too short (%d of %d readings), not measured. "
+                          "Hold the probes in longer.\n", dipWin.total, MIN_DIP_SAMPLES);
+          } else if (!tempInRange(dipTemp)) {
             // THE interlock. Outside the probe's rated range the compensation
             // was never characterised, so this is not a worse reading, it is
-            // not a reading. Drop it, and refuse to record the spoonful at all
-            // - carrying an earlier salinity onto food we know is out of range
-            // would be the log-it-anyway path wearing a different hat.
+            // not a reading. Drop it, and refuse to record the spoonful at all.
             Serial.printf("[DROP] %.1f C is outside the probe's %.0f-%.0f C range. "
                           "Dip discarded and this spoonful will not be recorded.\n",
                           dipTemp, PROBE_TEMP_MIN_C, PROBE_TEMP_MAX_C);
             outOfRange = true;
-          } else if (dipWin.total >= MIN_DIP_SAMPLES) {
-            measSalinity     = dipWin.medianEc();
-            measTemp         = dipTemp;
-            measSamples      = dipWin.total;
-            measTempSettled  = tempSettled(now);
-            haveMeasurement  = true;
-            lastSalinity     = measSalinity;
-            lastTemp         = measTemp;
-            haveLastSalinity = true;
-            if (!measTempSettled)
-              Serial.println("[WARN] Probe temperature still climbing when the dip ended. "
-                             "The EC compensation is reading a temperature the food never had - "
-                             "hold the probe in longer.");
           } else {
-            Serial.printf("[WARN] Dip too short (%d of %d readings), not measured. Hold it in longer.\n",
-                          dipWin.total, MIN_DIP_SAMPLES);
+            measSalinity    = dipWin.medianEc();
+            measTemp        = dipTemp;
+            measSamples     = dipWin.total;
+            measTempSettled = tempSettled(now);
+            haveMeasurement = true;
+            Serial.printf("--- Measured %.2f mS/cm at %.1f C from %d reading(s). "
+                          "Latched: taking the probes out will not change it.%s\n",
+                          measSalinity, measTemp, measSamples,
+                          measTempSettled ? "" : " [temp still climbing - dip longer next time]");
           }
-          // The probe leaned on the spoon for the whole dip, so the weight
+          // The probes leaned on the spoon for the whole dip, so the weight
           // window is full of nonsense and the load cell's rolling average is
-          // still flushing the probe out. Start over, and wait.
-          scoopWin.clear();
+          // still flushing them out. Start over, and wait.
+          weightWin.clear();
           emptySince = 0;
           weightTrustedAt = now + WEIGHT_TRUST_MS;
           state = haveMeasurement ? MEASURED : LOADED;
@@ -382,9 +370,9 @@ bool biteUpdate(const SensorReadings &r, unsigned long now, Bite &out) {
     }
 
     // ---------------- MEASURED ----------------
-    // Probe out, measurement in hand, spoon on its way to the mouth.
+    // Probes out, measurement latched, waiting for the food to go.
     case MEASURED:
-      if (isWet(r)) {                              // dipped again: the newer dip wins
+      if (isWet(r)) {                          // dipped again: the newer dip wins
         dipWin.clear();
         lastDipSampleAt = now - DIP_SAMPLE_MS;
         drySince = 0;
@@ -392,50 +380,75 @@ bool biteUpdate(const SensorReadings &r, unsigned long now, Bite &out) {
         state = DIPPING;
         return false;
       }
-      if (now < weightTrustedAt) return false;    // load cell still flushing the lifted probe
-      if (w > loadedG + TOPUP_G) {                 // more food went in - if it stays in
-        if (!heavySince) heavySince = now;
-        if (now - heavySince >= TOPUP_HOLD_MS) {   // measure the new scoop
-          haveMeasurement = false;
-          scoopWin.clear();
-          emptySince = 0;
-          state = LOADED;
-        }
-        return false;
-      }
-      heavySince = 0;
-      // Keep refining the scoop weight while the food is plainly still there,
-      // so a droplet carried off by the probe does not read as a bite.
-      if (w >= 0.7f * loadedG) weighScoop(r, w);
-      break;
+      break;                                   // shared checks below
   }
 
-  // ---- Shared: has the food left? (LOADED and MEASURED) ----
-  if (loadedG < MIN_SCOOP_G) return false;         // nothing was ever on it to leave
-  if (w >= loadedG * EMPTY_FRACTION) {
-    emptySince = 0;
+  // ---- Shared checks, for LOADED and MEASURED ----
+  if (now < weightTrustedAt) return false;     // load cell still flushing lifted probes
+  weightWin.add(w);
+
+  // More food went in, and stayed in: re-latch the scoop, keeping the dip.
+  if (w > loadedG + TOPUP_G) {
+    if (!heavySince) heavySince = now;
+    if (now - heavySince >= TOPUP_HOLD_MS && weightWin.full()) {
+      latchWeight(r);
+      heavySince = 0;
+      emptySince = 0;
+      Serial.printf("--- More food: now %.1f g.\n", loadedG);
+    }
     return false;
   }
-  if (!emptySince) emptySince = now;
-  if (now - emptySince < EMPTY_HOLD_MS) return false;   // ignore a lip knock or a fast tilt
+  heavySince = 0;
 
-  bool reported = emitBite(w, now, out);
-  if (!reported && state == LOADED) {
-    Serial.println("[WARN] Spoonful eaten without a dip and no earlier salinity to reuse. Not recorded.");
+  // The food is plainly still there. Any tipping before now was not a pour.
+  if (w >= loadedG * EMPTY_FRACTION) {
+    emptySince = 0;
+    pourTilt = 0;
+    return false;
+  }
+
+  // Wait for it to be gone: pouring a bowl out takes a moment, and half a pour
+  // must not read as a bite.
+  if (!emptySince) emptySince = now;
+  if (now - emptySince < EMPTY_HOLD_MS) return false;
+
+  bool ok = true;
+  if (outOfRange) {                            // the interlock already refused this one
+    Serial.println("--- Spoonful discarded (out of range), not recorded.");
+    ok = false;
+#if REQUIRE_POUR
+  } else if (haveMpu && pourTilt < POUR_TILT_DEG) {
+    // Weight left a bowl that stayed level. Something was lifted off it, not
+    // poured out of it, so nothing was eaten. Without an MPU there is no
+    // evidence either way and the drop is taken at face value.
+    Serial.printf("--- Weight left but the bowl never tipped (%.0f deg, needs %.0f). "
+                  "Lifted out, not poured: not a bite.\n", pourTilt, POUR_TILT_DEG);
+    ok = false;
+#endif
+  } else {
+    ok = emitBite(w, now, out);
   }
   resetScoop();
   state = EMPTY;
-  return reported;
+  return ok;
 }
 
+// One status line a second: enough to tune every threshold above from the bench.
 void biteDebugPrint(const SensorReadings &r) {
-  Serial.printf("  [%s] net %.1f g | tilt %.0f deg | still %s | probe %s (%.0f mV) | temp settled %s",
-                STATE_NAMES[state], netWeight(r), tiltDeg(),
-                isStill(r) ? "yes" : "no",
-                isWet(r) ? "IN" : (isDry(r) ? "out" : "--"), r.ecVoltageMv,
-                tempSettled(millis()) ? "yes" : "no");
-  if (loadedG > 0) Serial.printf(" | loaded %.1f g%s", loadedG, loadedStill ? "" : " (moving)");
-  if (state == DIPPING) Serial.printf(" | dip %d reading(s)", dipWin.total);
-  if (haveMeasurement) Serial.printf(" | measured %.2f mS/cm at %.1f C", measSalinity, measTemp);
+  const SensorReadings &s = r;
+  float w = netWeight(s);
+  unsigned long now = millis();
+
+  Serial.printf("[%s] weight %.1f g", STATE_NAMES[state], w);
+  if (loadedG > 0) Serial.printf(" (loaded %.1f g, %.0f%%)", loadedG, 100.0f * w / loadedG);
+  Serial.printf(" | EC %.0f mV %s", s.ecVoltageMv,
+                isWet(s) ? "WET" : (isDry(s) ? "dry" : "--"));
+  if (haveMeasurement) Serial.printf(" | latched %.2f mS/cm at %.1f C", measSalinity, measTemp);
+
+  if (state == FILLING)  Serial.printf(" | settling %lu/%d ms", now - loadedSince, LOAD_SETTLE_MS);
+  if (emptySince)        Serial.printf(" | emptying %lu/%d ms", now - emptySince, EMPTY_HOLD_MS);
+  if (now < weightTrustedAt) Serial.printf(" | weight ignored for %lu ms", weightTrustedAt - now);
+  if (!isLevel())        Serial.printf(" | tilted %.0f deg", tiltDeg());
+  if (emptySince)        Serial.printf(" | tipped %.0f/%.0f deg", pourTilt, (float)POUR_TILT_DEG);
   Serial.println();
 }

@@ -126,7 +126,10 @@ void sensorsUpdate() {
   if (g_now - lastT >= 750) { R.tempC = roundf(probeC * 16) / 16; lastT = g_now; }
 
   if (g_now - lastEc >= 100) {   // hot liquid conducts more; firmware compensates with probe temp
-    float mv25 = inFood ? w.soupMv25 : (w.wetted ? 120 : 3);
+    // Residue after the probe leaves the food. The model used to hold 120 mV
+    // indefinitely; the real probe (2026-09-20, 13 mS/cm brine) fell to 9 mV
+    // within one reading and settled at 3-4, peaking at 17. Measurement wins.
+    float mv25 = inFood ? w.soupMv25 : (w.wetted ? 15 : 3);
     float mv = mv25 * (1 + 0.0185f * ((inFood ? w.soupC : 25) - 25));
     R.ecVoltageMv = mv + noise(1);
     R.ecMsCm = R.ecVoltageMv / 164.0f / (1 + 0.0185f * (R.tempC - 25));
@@ -156,7 +159,7 @@ static std::vector<Detected> runSession(float startC, std::string *trace = nullp
     g_now += 20; sensorsUpdate();
     Bite b;
     if (biteUpdate(sensorsLatest(), g_now, b))
-      out.push_back({g_now / 1000.0f, b.weightG, b.salinityMsCm, b.heldStill, b.tempSettled, b.salinityCarried});
+      out.push_back({g_now / 1000.0f, b.weightG, b.salinityMsCm, b.heldStill, b.tempSettled, !b.salinityMeasured});
     if (g_verbose && g_now % 100 == 0) {
       const SensorReadings &q = sensorsLatest(); W w = worldAt(g_now / 1000.0f);
       printf("t=%5.1f %-8s wTrue=%5.1f sub=%d probeIn=%d | w=%5.1f loaded=%5.1f tilt=%3.0f still=%d "
@@ -183,7 +186,7 @@ static void scripted(const char *name, const char *expect, float startC = AMBIEN
 
 // Building blocks for scripted cases
 static void simScoop(float m, float soupC = 30) { move(0.8f, -0.20f, -15); set([=](W &w) { w.soupC = soupC; }); submerge(1.0f, m); move(0.5f, 0.10f, 0); }
-static void lift(float T = 0.8f, float dh = 0.30f, float tilt = 30) { move(T, dh, tilt); }
+static void lift(float T = 0.8f, float dh = 0.30f, float tilt = 70) { move(T, dh, tilt); }
 static void lower(float dh = 0.30f) { move(0.8f, -dh, 0); }
 
 // ---------------- randomized sessions ----------------
@@ -203,10 +206,11 @@ static float cursor() { return endTime(); }
 static void rScoop(float m) {
   float d = U(0.10f, 0.25f);
   move(U(0.5f, 1.2f), -d, -U(5, 25)); submerge(U(0.4f, 1.5f), m); move(U(0.3f, 0.8f), d * U(0.3f, 0.6f), U(-5, 5));
+  rest(U(3.2f, 4.5f));       // hold it while the weight latches (LOAD_SETTLE_MS)
 }
 static void rPause() { if (U(0, 1) > 0.3f) rest(U(0.3f, 2.0f)); }            // 30%: no pause at all
 static void rDip(float lo = 0.8f, float hi = 2.5f) { dip(U(lo, hi), U(2, 10)); }
-static float rLift() { float h = U(0.15f, 0.40f); move(U(0.5f, 1.8f), h, U(10, 60)); return h; }
+static float rLift() { float h = U(0.15f, 0.40f); move(U(0.5f, 1.8f), h, U(50, 95)); return h; }
 static void rLower(float h) { rest(U(0, 0.5f)); move(U(0.5f, 1.2f), -h, U(-5, 5)); }
 
 static Expect addAction(Act a) {
@@ -225,6 +229,7 @@ static Expect addAction(Act a) {
     case TOPUP: {   rScoop(m); rPause(); rDip(); float d = U(0.1f, 0.2f);
                     move(U(0.5f, 1.0f), -d, -U(5, 25)); float m2 = m + U(4, 12); left = m2 * U(0, 0.1f);
                     submerge(U(0.5f, 1.5f), m2); move(U(0.3f, 0.8f), d * 0.5f, U(-5, 5));
+                    rest(U(3.2f, 4.5f));       // the top-up has to latch too
                     rPause(); rDip(); float h = rLift(); eat(U(0.6f, 1.5f), left); rLower(h);
                     // Dunking a measured spoonful back in the bowl IS a falling
                     // weight, so it closes a bite and the re-scoop opens another.
@@ -240,7 +245,7 @@ static Expect addAction(Act a) {
                     float h = rLift(); eat(U(0.6f, 1.5f), left); rLower(h); e.grams = m - left; break; }
     default: break;
   }
-  rest(U(1.0f, 2.0f));
+  rest(U(2.5f, 3.5f));       // long enough for EMPTY_HOLD_MS to confirm inside this action
   e.t1 = cursor();
   return e;
 }

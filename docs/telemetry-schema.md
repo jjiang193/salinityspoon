@@ -96,6 +96,7 @@ raw samples stay local, and only fused bites become durable records.
 | `quality` | 0–1 | Trust score, see below |
 | `ec_sample_count` | — | EC samples behind this bite. Low count = suspect |
 | `pace` | — | `green` \| `yellow` \| `red`. The LED's state; `red` is what sets the `fast` flag |
+| `pour_tilt_deg` | degrees | Load-cell spoon only: how far the bowl was tipped while it emptied, measured from the orientation learned at boot. The device requires 45° before it records a bite at all — weight leaving a level bowl is something lifted off it, not food poured out of it — so this is the evidence the bite was confirmed, and what a threshold change should be argued from |
 
 ### `salinity_source`
 

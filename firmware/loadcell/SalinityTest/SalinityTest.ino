@@ -3,10 +3,12 @@
  * Reads every sensor at 50 Hz, detects bites, prints sodium per bite, lights the LED
  * when bites come too fast.
  *
- * How to use it: scoop -> dip the probe into the spoon for about a second -> lift
- * the probe out -> eat. The weight is taken before the dip (the probe leans on the
- * spoon, so the load cell is only honest while it is out) and the bite is closed
- * when the weight falls away. See BiteDetector.h.
+ * How to use it: food in -> wait ~3 s for the weight to latch -> dip the probes in
+ * for a second or two -> lift them out -> TIP THE BOWL OUT. The weight is latched
+ * before the dip (the probes lean on the spoon, so the load cell is only honest
+ * while they are out), the salinity is latched when the dip ends, and the bite is
+ * logged once the bowl has stayed empty for 2 s AND was tipped past 45 deg while
+ * emptying - lifting something off a level bowl is not a bite. See BiteDetector.h.
  *
  * Before running: calibrate EC (ECCalibrate.ino) and the load cell (LoadCellCalibrate.ino).
  * Boot with the spoon empty, level and still. Type z + Enter to re-zero later.
@@ -15,6 +17,7 @@
 #include "Sensors.h"
 #include "BiteDetector.h"
 #include "PaceLed.h"
+#include "Net.h"
 
 #define LOOP_MS   20     // 50 Hz
 #define DEBUG_MS  1000   // status line every second (0 = only print bites)
@@ -25,13 +28,14 @@ void setup() {
   Serial.println("=== Sodium spoon: bite detection ===");
 
   paceBegin();
+  netBegin();                                         // Wi-Fi + AWS IoT, non-blocking
   if (!sensorsBegin()) Serial.println("[!] Some sensors missing, see warnings above.");
 
   // Fill the weight average, then zero and learn "level"
   unsigned long start = millis();
   while (millis() - start < 700) { sensorsUpdate(); delay(LOOP_MS); }
   biteBegin();
-  Serial.println("Ready. Scoop, hold level for ~0.5 s, dip the probe in for ~1 s, lift it out, eat.");
+  Serial.println("Ready. Load the bowl, wait ~3 s, dip the probes in, lift them out, then TIP it out.");
 }
 
 void loop() {
@@ -57,19 +61,25 @@ void loop() {
                   (unsigned long)b.biteId, b.weightG, b.loadedG, b.leftoverG,
                   b.salinityMsCm, b.tempC, b.dipSamples, b.sodiumMg, b.sodiumLowMg, b.sodiumHighMg,
                   b.heldStill ? "" : " [weighed moving]", b.tempSettled ? "" : " [temp settling]",
-                  b.salinityCarried ? " [NOT DIPPED: salinity reused from the last dip]" : "");
+                  b.salinityMeasured ? "" : " [NOT DIPPED: salinity 0, sodium unknown]");
+    Serial.printf("    (tipped %.0f deg while emptying)\n", b.pourTiltDeg);
 
     unsigned long gapMs;
-    if (paceOnBite(now, gapMs)) {
+    bool tooFast = paceOnBite(now, gapMs);
+    if (tooFast) {
       Serial.printf("!!! EATING TOO FAST: %.1f s since the last bite (LED on %d s)\n",
                     gapMs / 1000.0f, WARN_ON_MS / 1000);
     }
+    // Off to AWS, or into the queue if the network is down.
+    netSendBite(b, gapMs, b.biteId > 1, tooFast);
   }
   paceUpdate(now);                                    // turns the LED off after WARN_ON_MS
+  netLoop(now);                                       // connect, keep alive, drain the queue
 
   if (DEBUG_MS && now - lastDebug >= DEBUG_MS) {
     lastDebug = now;
     sensorsPrint(r);
     biteDebugPrint(r);
+    netStatusLine();
   }
 }
