@@ -9,15 +9,15 @@ board (DS18B20, ADS1115, MPU-6050, HX711). **Bite logic tested in simulation onl
 load cell and EC not calibrated yet.
 
 The measurement flow was rebuilt around a **probe dipped into the spoon** rather
-than one riding in the bowl — see *How a bite is decided*. The simulation has
-been rewritten to match but **has not been run since**; its numbers are gone
-until it is.
+than one riding in the bowl — see *How a bite is decided*. It now also **sends
+bites to the backend** over WiFi (`Uplink.cpp`), so this sketch no longer stops
+at Serial.
 
 ## What's here
 
 | Path | What it is |
 |---|---|
-| `SalinityTest/` | Main sketch: sensors at 50 Hz, bite detection, sodium per bite, pace LED |
+| `SalinityTest/` | Main sketch: sensors at 50 Hz, bite detection, sodium per bite, pace LED, WiFi uplink |
 | `ECCalibrate/` | Two-point EC calibration (1413 µS/cm, 12.88 mS/cm), saves K to flash |
 | `LoadCellCalibrate/` | Finds `LOADCELL_SCALE` with a known weight |
 | `test/` | Host-side simulation of the real `BiteDetector.cpp` (`make run`) |
@@ -33,7 +33,9 @@ until it is.
 | Pace LED (red) | GPIO25 → 220–330 Ω → LED → GND |
 
 Everything on 3.3 V. Libraries: DFRobot_EC, OneWire, DallasTemperature, Adafruit
-MPU6050, Adafruit ADS1X15, HX711 (Bogdan Necula).
+MPU6050, Adafruit ADS1X15, HX711 (Bogdan Necula), and for the uplink
+**ArduinoJson** (Benoit Blanchon) and **WebSockets** (Markus Sattler,
+"arduinoWebSockets").
 
 ## How a bite is decided
 
@@ -85,6 +87,58 @@ this MPU's per-axis error (reads 10.88 at rest) plus hand tremor it drifted by
 metres in simulation.
 
 **Pace:** two bites < 6 s apart → LED on for 5 s.
+
+## Sending bites to the backend
+
+`Uplink.cpp` connects to `ws://BACKEND_HOST:8000/ws/ingest` and emits one
+`bite/v2` per bite, the format in `docs/telemetry-schema.md`. Ported from
+`firmware/spoon`, which had the transport but no load cell.
+
+Credentials go in `SalinityTest/secrets.h` (gitignored, create it yourself):
+
+```c
+#define WIFI_SSID      "my-network"
+#define WIFI_PASSWORD  "..."
+#define BACKEND_HOST   "192.168.1.100"   // the laptop, not localhost
+```
+
+Start the backend with `--host 0.0.0.0`. Bound to localhost it is invisible to
+the spoon, which connects from another machine.
+
+**Offline is a supported state.** With no `secrets.h`, no WiFi or no server, the
+sketch keeps detecting and printing bites over Serial — that is how you bench it,
+and the socket reconnects by itself. But **bites taken offline are dropped, not
+queued**, so the debug line counts them (`3 LOST while offline`) rather than let
+a demo look healthy while the dashboard sits empty.
+
+Three mappings worth knowing, all of which the contract already had a place for:
+
+| Firmware | `bite/v2` | Why |
+|---|---|---|
+| measured grams | `weightGrams` + `volume_source: "load_cell"` | the whole point of this spoon; `backend/app/schema.py` already accepts `load_cell` |
+| `salinityCarried` | `salinity_source: "bowl_reference"` | the contract's own term for a salinity inherited from an earlier in-range reading of the same vessel — the dashboard labels it |
+| `heldStill`, `tempSettled` | `flags: ["moving", "tempUnsettled"]` | both already documented as load-cell-only flags |
+
+**The salt model changed.** This firmware used a linear
+`NACL_MG_PER_G_PER_MS = 0.55`; it now uses the quadratic curve shared with
+`firmware/spoon/config.h` and `backend/app/salinity.py`, because
+`docs/telemetry-schema.md` says `salinity_g_l` comes from "the calibrated
+quadratic curve, not a linear factor". This is not cosmetic: `store.recompute_meal`
+**sums the device's `sodiumEstimate`** rather than recomputing it, so whatever the
+firmware calculates is the number on the clinician's screen.
+
+### Verified end to end, minus the ESP32
+
+The exact JSON this emits was pushed through a running backend over the real
+socket: 3 in-range bites stored with every field round-tripping, meal total
+74.9 mg against 74.9 mg expected, 33.2 g, and a 55 °C bite **refused by the
+server** as well as by the device.
+
+One gap that double enforcement does not close: the backend judges the
+temperature the device reports, so a dip too short for the probe to warm up
+sends an honest-looking in-range reading and **both** checks pass. The server
+also sends its rejection to the patient's session socket, not back down
+`/ws/ingest`, so the device never learns a bite was refused.
 
 ## How long does the dip have to be?
 
@@ -169,3 +223,6 @@ Simulated, not measured.
    probe is down.
 6. Time how long the probe takes to stop climbing in the food, and set the dip
    length — and `TAU_IN` in the simulation — from that, not from a guess.
+7. Create `SalinityTest/secrets.h`, start the backend on `0.0.0.0`, and watch for
+   `[ws] connected` and then `[uplink] connected | N sent` in the debug line.
+   The dashboard should show the same bite the Serial monitor just printed.

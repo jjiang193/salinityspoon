@@ -35,6 +35,7 @@
 #define BITE_DETECTOR_H
 
 #include "Sensors.h"
+#include "Salinity.h"
 
 // ---- Scoop: probe out of the spoon, so the load cell can be believed ----
 #define MIN_SCOOP_G          4.0f  // less than this counts as empty (above noise)
@@ -84,9 +85,12 @@
 #define STILL_GYRO_RAD_S     0.35f // rotation below this = still
 #define STILL_ACCEL_DEV      1.0f  // |accel| within this of its at-rest value = still
 
-// ---- Sodium estimate (placeholders until tested with known salt solutions) ----
-#define NACL_MG_PER_G_PER_MS  0.55f   // mg salt per g food, per mS/cm (salt water ~0.5-0.57)
-#define SODIUM_PER_NACL       0.393f  // sodium is 39.3% of salt by weight
+// ---- Sodium estimate ----
+// The curve itself is in Salinity.h / Config.h, shared with firmware/spoon and
+// backend/app/salinity.py. It replaced a linear mg-per-g-per-mS factor, which
+// docs/telemetry-schema.md rules out in as many words: salinity_g_l comes from
+// "the calibrated quadratic curve, not a linear factor". It matters because the
+// backend sums the device's sodiumEstimate rather than recomputing it.
 #define SODIUM_RANGE_FRAC     0.30f   // +/-30%: EC reads all ions, plus weight error
 #define SODIUM_RANGE_EXTRA    0.15f   // +15% for each quality flag that's false
 
@@ -100,6 +104,7 @@ struct Bite {
   uint32_t      biteId;                      // counter since boot
   unsigned long ms;                          // millis() when confirmed
   float salinityMsCm, tempC;                 // salinity already compensated to 25 C
+  float salinityGL;                          // ...through the quadratic curve, g/L NaCl
   float weightG, loadedG, leftoverG;         // eaten = loaded - leftover
   float sodiumMg, sodiumLowMg, sodiumHighMg;
   int   dipSamples;                          // EC readings behind the salinity (0 = carried)

@@ -12,9 +12,11 @@
  * Boot with the spoon empty, level and still. Type z + Enter to re-zero later.
  * Serial Monitor: 115200 baud.
  */
+#include "Config.h"
 #include "Sensors.h"
 #include "BiteDetector.h"
 #include "PaceLed.h"
+#include "Uplink.h"
 
 #define LOOP_MS   20     // 50 Hz
 #define DEBUG_MS  1000   // status line every second (0 = only print bites)
@@ -31,6 +33,11 @@ void setup() {
   unsigned long start = millis();
   while (millis() - start < 700) { sensorsUpdate(); delay(LOOP_MS); }
   biteBegin();
+
+  // After biteBegin(), which needs the spoon empty and still: connecting WiFi
+  // takes seconds and the zeroing must not sit waiting on a network.
+  uplinkBegin();
+
   Serial.println("Ready. Scoop, hold level for ~0.5 s, dip the probe in for ~1 s, lift it out, eat.");
 }
 
@@ -60,16 +67,28 @@ void loop() {
                   b.salinityCarried ? " [NOT DIPPED: salinity reused from the last dip]" : "");
 
     unsigned long gapMs;
-    if (paceOnBite(now, gapMs)) {
+    bool tooFast = paceOnBite(now, gapMs);
+    if (tooFast) {
       Serial.printf("!!! EATING TOO FAST: %.1f s since the last bite (LED on %d s)\n",
                     gapMs / 1000.0f, WARN_ON_MS / 1000);
     }
+    // gapMs is 0 on the first bite since boot, which is not an interval of zero.
+    uplinkPublish(b, gapMs ? gapMs / 1000.0f : -1.0f, tooFast);
   }
   paceUpdate(now);                                    // turns the LED off after WARN_ON_MS
+  uplinkLoop();                                       // services the WebSocket + reconnects
 
   if (DEBUG_MS && now - lastDebug >= DEBUG_MS) {
     lastDebug = now;
     sensorsPrint(r);
     biteDebugPrint(r);
+    uint32_t sent, dropped;
+    uplinkStats(sent, dropped);
+    Serial.printf("  [uplink] %s | %lu sent", uplinkConnected() ? "connected" : "OFFLINE",
+                  (unsigned long)sent);
+    // Offline bites are lost, not queued. Say the number rather than let a
+    // demo look like it is working while the dashboard sits empty.
+    if (dropped) Serial.printf(" | %lu LOST while offline", (unsigned long)dropped);
+    Serial.println();
   }
 }

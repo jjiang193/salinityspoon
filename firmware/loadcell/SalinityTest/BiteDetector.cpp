@@ -180,12 +180,15 @@ static void weighScoop(const SensorReadings &r, float w) {
   }
 }
 
-// sodium mg = salinity x salt mg per g per mS/cm x grams x sodium share of salt
+// EC -> g/L NaCl through the shared quadratic curve -> sodium mg for the grams
+// the load cell weighed. Dilution is applied after the conversion, never before.
 static void estimateSodium(Bite &b) {
   float range = SODIUM_RANGE_FRAC + (b.heldStill ? 0 : SODIUM_RANGE_EXTRA)
                                   + (b.tempSettled ? 0 : SODIUM_RANGE_EXTRA)
                                   + (b.salinityCarried ? SODIUM_RANGE_CARRIED : 0);
-  b.sodiumMg     = fmaxf(b.salinityMsCm, 0.0f) * NACL_MG_PER_G_PER_MS * fmaxf(b.weightG, 0.0f) * SODIUM_PER_NACL;
+  b.salinityGL   = salinity::applyDilution(
+                     salinity::ecToGramsPerLitre(fmaxf(b.salinityMsCm, 0.0f)), DILUTION_FACTOR);
+  b.sodiumMg     = salinity::sodiumMg(b.salinityGL, fmaxf(b.weightG, 0.0f));
   b.sodiumLowMg  = b.sodiumMg * (1.0f - range);
   b.sodiumHighMg = b.sodiumMg * (1.0f + range);
 }
