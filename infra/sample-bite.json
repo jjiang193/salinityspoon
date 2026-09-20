@@ -1,0 +1,22 @@
+{
+  "schema": "bite/v2",
+  "deviceId": "spoon-01",
+  "bite_id": 7,
+  "timestamp": "2026-09-19T18:04:12.317Z",
+  "salinityIndex": 10.11,
+  "tempC": 36.8,
+  "salinity_g_l": 5.43,
+  "salinity_source": "measured",
+  "dilution_factor": 1.0,
+  "weightGrams": 11.4,
+  "volume_source": "load_cell",
+  "sodiumEstimate": 24.4,
+  "sodium_mg_low": 17.1,
+  "sodium_mg_high": 31.7,
+  "quality": 0.9,
+  "ec_sample_count": 25,
+  "biteIntervalSec": 3.8,
+  "pace": "red",
+  "flags": ["fast"],
+  "fw_version": "0.2.0"
+}

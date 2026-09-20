@@ -1,0 +1,213 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  NaTrack phase 1 - the ingest spine.
+  Spoon -> IoT Core -> rule -> SQS -> ingestBite Lambda -> DynamoDB.
+  Follows docs/natrack-system-design.pdf and docs/loadcell/aws-handoff.md;
+  the message itself is bite/v2 from docs/telemetry-schema.md.
+
+Parameters:
+  DeviceId:
+    Type: String
+    Default: spoon-01
+    Description: Thing name and MQTT client id of the first spoon.
+  DefaultPatientId:
+    Type: String
+    Default: demo-1
+    Description: >
+      Patient used when a device has no pairing item yet. Demo only -
+      POST /v1/devices/{id}/pair writes the real one (phase 3).
+  BiteRetentionDays:
+    Type: Number
+    Default: 90
+    Description: >
+      TTL on bite items. The design archives older bites to S3 via Streams
+      (phase 5); until that exists, expiring items are simply deleted.
+
+Globals:
+  Function:
+    Runtime: python3.12
+    MemorySize: 256
+    Timeout: 30
+    Architectures: [arm64]
+
+Resources:
+  # --- Storage ---------------------------------------------------------------
+  # Two tables, as the design PDF specifies: telemetry separate from patient
+  # medical data, so the ingest path never holds permission on the latter.
+  TelemetryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::StackName}-telemetry"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - {AttributeName: PK, AttributeType: S}
+        - {AttributeName: SK, AttributeType: S}
+      KeySchema:
+        - {AttributeName: PK, KeyType: HASH}
+        - {AttributeName: SK, KeyType: RANGE}
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  # Profiles, sodium targets, health logs, clinician assignments.
+  # Nothing in phase 1 writes here; it exists so phase 3 has it and so the
+  # ingest role can be scoped away from it from the first commit.
+  PatientsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::StackName}-patients"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - {AttributeName: PK, AttributeType: S}
+        - {AttributeName: SK, AttributeType: S}
+        - {AttributeName: GSI1PK, AttributeType: S}
+        - {AttributeName: GSI1SK, AttributeType: S}
+      KeySchema:
+        - {AttributeName: PK, KeyType: HASH}
+        - {AttributeName: SK, KeyType: RANGE}
+      GlobalSecondaryIndexes:
+        # CLINICIAN#<id> -> their patients, for GET /v1/patients?clinicianId=
+        - IndexName: GSI1
+          KeySchema:
+            - {AttributeName: GSI1PK, KeyType: HASH}
+            - {AttributeName: GSI1SK, KeyType: RANGE}
+          Projection: {ProjectionType: ALL}
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  # --- Buffer ----------------------------------------------------------------
+  # The queue absorbs the meal-time spike and gives retries. At-least-once
+  # delivery is why the write below is idempotent.
+  BiteIngestDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-bite-ingest-dlq"
+      MessageRetentionPeriod: 1209600 # 14 days
+      SqsManagedSseEnabled: true
+
+  BiteIngestQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-bite-ingest"
+      # At least 6x the function timeout, as Lambda's SQS trigger requires.
+      VisibilityTimeout: 180
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt BiteIngestDLQ.Arn
+        maxReceiveCount: 5
+
+  # --- Ingest ----------------------------------------------------------------
+  IngestBiteFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-ingestBite"
+      CodeUri: ingest/
+      Handler: app.handler
+      Description: Validates bite/v2, resolves the patient, writes it once.
+      Environment:
+        Variables:
+          TELEMETRY_TABLE: !Ref TelemetryTable
+          DEFAULT_PATIENT_ID: !Ref DefaultPatientId
+          BITE_RETENTION_DAYS: !Ref BiteRetentionDays
+      Policies:
+        # Least privilege on purpose: two actions, one table, no Patients table.
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:PutItem, dynamodb:GetItem]
+              Resource: !GetAtt TelemetryTable.Arn
+      Events:
+        Bites:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt BiteIngestQueue.Arn
+            BatchSize: 10
+            MaximumBatchingWindowInSeconds: 5
+            FunctionResponseTypes: [ReportBatchItemFailures]
+
+  # Health data: keep the logs short-lived and never log a payload (see app.py).
+  IngestBiteLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-ingestBite"
+      RetentionInDays: 14
+
+  # --- Device side -----------------------------------------------------------
+  SpoonThing:
+    Type: AWS::IoT::Thing
+    Properties:
+      ThingName: !Ref DeviceId
+
+  # Connect as itself, publish to its own topic. Nothing else.
+  SpoonPolicy:
+    Type: AWS::IoT::Policy
+    Properties:
+      PolicyName: !Sub "${AWS::StackName}-spoon"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: iot:Connect
+            Resource: !Sub "arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:client/${DeviceId}"
+          - Effect: Allow
+            Action: iot:Publish
+            Resource: !Sub "arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:topic/devices/${DeviceId}/bites"
+
+  IoTRuleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: iot.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: send-to-bite-queue
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt BiteIngestQueue.Arn
+
+  # topic(2) is the deviceId segment of devices/<id>/bites. Selecting it
+  # overwrites whatever deviceId the payload claims, so one spoon cannot
+  # impersonate another.
+  BiteTopicRule:
+    Type: AWS::IoT::TopicRule
+    Properties:
+      RuleName: !Sub
+        - "${Name}_bites"
+        - Name: !Join ["_", !Split ["-", !Ref "AWS::StackName"]]
+      TopicRulePayload:
+        Sql: "SELECT *, topic(2) AS deviceId FROM 'devices/+/bites'"
+        AwsIotSqlVersion: "2016-03-23"
+        RuleDisabled: false
+        Actions:
+          - Sqs:
+              QueueUrl: !Ref BiteIngestQueue
+              RoleArn: !GetAtt IoTRuleRole.Arn
+              UseBase64: false
+
+Outputs:
+  TelemetryTableName:
+    Value: !Ref TelemetryTable
+  PatientsTableName:
+    Value: !Ref PatientsTable
+  BiteQueueUrl:
+    Value: !Ref BiteIngestQueue
+  BiteDLQUrl:
+    Value: !Ref BiteIngestDLQ
+  IngestFunctionName:
+    Value: !Ref IngestBiteFunction
+  DeviceTopic:
+    Value: !Sub "devices/${DeviceId}/bites"
