@@ -737,18 +737,18 @@ th.num + th.num, td.num + td.num { padding-left: 12px; }
   flex-direction: column;
   gap: 8px;
   padding: 28px 24px 24px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--border);
   border-radius: 14px;
-  background: var(--panel);
+  background: var(--surface);
 }
 .signin-card h1 { margin: 0; font-size: 1.5rem; letter-spacing: -0.01em; }
-.signin-sub { margin: 0 0 12px; color: var(--muted); font-size: 0.875rem; }
-.signin-card label { font-size: 0.8125rem; color: var(--muted); }
+.signin-sub { margin: 0 0 12px; color: var(--text-muted); font-size: 0.875rem; }
+.signin-card label { font-size: 0.8125rem; color: var(--text-muted); }
 .signin-card input {
   padding: 9px 11px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: var(--bg);
+  background: var(--plane);
   color: inherit;
   font: inherit;
 }
@@ -759,11 +759,11 @@ th.num + th.num, td.num + td.num { padding-left: 12px; }
   border: 0;
   border-radius: 8px;
   background: var(--accent);
-  color: var(--accent-ink, #fff);
+  color: var(--on-accent);
   font: inherit;
   font-weight: 600;
   cursor: pointer;
 }
 .signin-card button:disabled { opacity: 0.55; cursor: default; }
-.signin-error { margin: 4px 0 0; color: var(--bad, #b42318); font-size: 0.875rem; }
-.signin-note { margin: 14px 0 0; color: var(--muted); font-size: 0.75rem; text-align: center; }
+.signin-error { margin: 4px 0 0; color: var(--severity-critical, #b42318); font-size: 0.875rem; }
+.signin-note { margin: 14px 0 0; color: var(--text-muted); font-size: 0.75rem; text-align: center; }

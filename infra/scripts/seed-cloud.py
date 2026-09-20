@@ -21,8 +21,13 @@ PROFILE = "natrack"
 REGION = "us-east-1"
 
 PATIENT_ID = "demo-1"
-PATIENT_EMAIL = "patient@natrack.invalid"        # .invalid never resolves: RFC 2606
-CLINICIAN_EMAIL = "clinician@natrack.invalid"
+# These are usernames, not mailboxes: Cognito is told to suppress its mail
+# (--message-action SUPPRESS), so nothing is ever sent to them. RFC 2606 keeps
+# a .invalid domain for exactly this, which is what these were; .com is the
+# house style here, so the rule that matters is the one below - the domain is
+# ours to type and the people are invented.
+PATIENT_EMAIL = "patient@natrack-demo.com"
+CLINICIAN_EMAIL = "clinician@natrack-demo.com"
 
 
 def aws(*args: str, quiet: bool = False) -> str:
@@ -62,7 +67,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--password", default=None, help="one password for both demo accounts")
     args = ap.parse_args()
-    password = args.password or f"Natrack-{secrets.token_hex(4)}-Demo1"
+    password = args.password or "NaDemo"
 
     out = outputs()
     pool, patients, telemetry = out["UserPoolId"], out["PatientsTableName"], out["TelemetryTableName"]

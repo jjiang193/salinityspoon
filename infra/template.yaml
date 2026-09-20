@@ -323,11 +323,15 @@ Resources:
           AttributeDataType: String
           Mutable: true
       Policies:
+        # Loose on purpose, and only defensible because every account in this
+        # pool is a demo account holding invented data. Real patients need the
+        # 12-character policy back, and MFA required rather than optional -
+        # both are one edit here, and the BAA checklist asks for them anyway.
         PasswordPolicy:
-          MinimumLength: 12
+          MinimumLength: 6
           RequireLowercase: true
           RequireUppercase: true
-          RequireNumbers: true
+          RequireNumbers: false
           RequireSymbols: false
       # MFA for clinicians is what the reference sheet asks for. It is OPTIONAL
       # here so a demo account can sign in without a phone, and turning it on is
