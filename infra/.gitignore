@@ -1,0 +1,5 @@
+.aws-sam/
+samconfig.toml
+*.pem
+*.pem.crt
+*.pem.key
