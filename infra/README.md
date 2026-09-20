@@ -75,7 +75,14 @@ python3 infra/scripts/watch-session.py demo-1     # leave this open
 infra/scripts/publish-test-bite.sh                # in another terminal
 ```
 
-The bite should appear in the watcher about a second after it is stored.
+The bite should appear in the watcher about a second after it is published.
+Measured on the deployed stack: published 07:59:52, on screen 07:59:53.
+
+That second is mostly Lambda. The first version of this stack batched SQS
+messages for up to 5 s and took **22 s** end to end; `MaximumBatchingWindowInSeconds`
+is 0 because the window is pure latency on the live view and a spoon sends one
+bite every few seconds at most. Batching earns its keep at 10k bites/s, not at
+one — turn it back up if that day arrives.
 
 **The patient is a query string, not a path.** NaTrack writes the live view as
 `wss://.../session/{patientId}`, but a WebSocket API routes on the message body

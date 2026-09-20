@@ -140,7 +140,10 @@ Resources:
           Properties:
             Queue: !GetAtt BiteIngestQueue.Arn
             BatchSize: 10
-            MaximumBatchingWindowInSeconds: 5
+            # 0, not 5: the batching window is pure latency on the live view,
+            # and a spoon sends one bite every few seconds at most. Batching
+            # earns its keep at 10k bites/s, not at one.
+            MaximumBatchingWindowInSeconds: 0
             FunctionResponseTypes: [ReportBatchItemFailures]
 
   # Health data: keep the logs short-lived and never log a payload (see app.py).
