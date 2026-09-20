@@ -8,9 +8,10 @@ import { LiveView } from './views/LiveView';
 import { Chip } from './components/Chip';
 import { ThemeToggle } from './components/ThemeToggle';
 import * as sev from './lib/severity';
-import { PROBE_TEMP_MAX_C } from './types';
+import { PROBE_TEMP_MAX_C, SpoonStatus } from './types';
 
-interface Spoon { patientId: string; mealId: number | null; deviceId: string | null }
+/** A spoon that last sent a sample longer ago than this is not switched on. */
+const SPOON_ONLINE_S = 10;
 
 /**
  * NaTrack's three views: the clinician dashboard, the patient portal, the live
@@ -26,14 +27,24 @@ export default function App() {
 
   // Who holds the spoon. Polled: it changes when someone starts a meal, which
   // no single patient's session is entitled to hear about.
-  const spoon = useApi<Spoon>('/api/spoon', 0, 5000);
+  const spoon = useApi<SpoonStatus>('/api/spoon', 0, 5000);
   const holderId = spoon.data?.patientId ?? null;
+  // Any spoon at all, by the server's clock. Null until the server has said:
+  // "unknown" must not read as "off". A failed poll keeps the last answer, so
+  // it is only believed while the polls are succeeding.
+  const spoonOnline = spoon.data && spoon.error === null
+    ? spoon.data.sample_age_s !== null && spoon.data.sample_age_s < SPOON_ONLINE_S
+    : null;
 
   const sessionPatientId = route.view === 'live' ? holderId : route.patientId;
   const telemetry = useTelemetry(sessionPatientId);
 
   // With no session open, the roster's own polling is the evidence of a link.
-  const connected = sessionPatientId !== null ? telemetry.connected : spoon.error === null;
+  // A session refused for an unknown patient is closed too, but the server
+  // answered to refuse it - so there as well the polling is the evidence.
+  const connected = sessionPatientId !== null && !telemetry.notFound
+    ? telemetry.connected
+    : spoon.error === null;
 
   // The Patient tab remembers whose chart you were just reading.
   const portalPatientId =
@@ -80,9 +91,10 @@ export default function App() {
       </nav>
 
       {route.view === 'live' ? (
-        <LiveView patientId={holderId} telemetry={telemetry} />
+        <LiveView patientId={holderId} telemetry={telemetry} spoonError={spoon.error} />
       ) : route.view === 'patient' ? (
-        <PatientView patientId={route.patientId} tab={route.tab} telemetry={telemetry} />
+        <PatientView patientId={route.patientId} tab={route.tab} telemetry={telemetry}
+                     spoonOnline={spoonOnline} />
       ) : route.patientId ? (
         <ClinicianPatient patientId={route.patientId} telemetry={telemetry} />
       ) : (

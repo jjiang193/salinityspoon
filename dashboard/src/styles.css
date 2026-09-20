@@ -12,7 +12,8 @@
   --surface:        #ffffff;
   --text-primary:   #0d2137;
   --text-secondary: #46576c;
-  --text-muted:     #7b8a9e;
+  --text-muted:     #5f6e83;   /* 5.2:1 on --surface, 4.8:1 on --plane */
+  --today-opacity:  0.45;      /* today's unfinished bar; see DailyTrendChart */
   --grid:           #e4eaf2;
   --axis:           #c4cfdd;
   --border:         rgba(13, 33, 55, 0.12);
@@ -53,6 +54,7 @@
     --text-primary:   #ffffff;
     --text-secondary: #c3c2b7;
     --text-muted:     #898781;
+    --today-opacity:  0.6;
     --grid:           #2c2c2a;
     --axis:           #383835;
     --border:         rgba(255, 255, 255, 0.10);
@@ -77,6 +79,7 @@
   --text-primary:   #ffffff;
   --text-secondary: #c3c2b7;
   --text-muted:     #898781;
+  --today-opacity:  0.6;
   --grid:           #2c2c2a;
   --axis:           #383835;
   --border:         rgba(255, 255, 255, 0.10);
@@ -117,7 +120,7 @@ header.masthead {
 .masthead-tools { display: flex; align-items: center; gap: 8px; }
 .theme-toggle {
   display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
-  font: inherit; font-size: 11.5px; font-weight: 500; padding: 3px 9px;
+  font: inherit; font-size: 12px; font-weight: 500; padding: 3px 9px;
   border-radius: 4px; border: 1px solid var(--border);
   background: transparent; color: var(--text-secondary);
 }
@@ -150,6 +153,8 @@ header.masthead {
   .grid.two, .grid.hero { grid-template-columns: 1fr; }
 }
 .stack { display: flex; flex-direction: column; gap: 16px; }
+/* A chart inside a grid or stack cell must be allowed to shrink with it. */
+.grid > *, .stack > * { min-width: 0; }
 
 /* --- Hero figure --- */
 .hero-value {
@@ -183,11 +188,11 @@ header.masthead {
 /* --- Status pills: icon + label, never color alone --- */
 .pill {
   display: inline-flex; align-items: center; gap: 6px;
-  font-size: 11.5px; font-weight: 500; padding: 3px 9px;
+  font-size: 12px; font-weight: 500; padding: 3px 9px;
   border-radius: 4px; border: 1px solid var(--border);
   color: var(--text-primary); background: var(--plane);
 }
-.pill .dot { font-size: 9px; line-height: 1; color: var(--text-muted); }
+.pill .dot { font-size: 11px; line-height: 1; color: var(--text-muted); }
 
 /* Tier decides whether a chip gets colour at all. See src/lib/severity.ts:
    ambient state is the common case and stays neutral, so the states that do
@@ -207,11 +212,20 @@ header.masthead {
 .pill[data-status='warning']:not([data-tier])  .dot { color: var(--status-warning); }
 .pill[data-status='critical']:not([data-tier]) .dot { color: var(--status-critical); }
 
-.mk { color: var(--status-warning); margin-right: 6px; font-size: 10px; }
+.mk { color: var(--status-warning); margin-right: 6px; font-size: 11px; }
+/* The marker is chosen by markerFor(); a critical shape takes the critical colour. */
+.mk[data-status='critical'] { color: var(--status-critical); }
 .note.attention { color: var(--text-primary); }
 
 .pill-row { display: flex; flex-wrap: wrap; gap: 6px; }
+/* Beside a button a stretched chip is the button's height and reads as one. */
+.view-head .pill-row { align-items: center; }
 .note { font-size: 12.5px; color: var(--text-secondary); margin: 11px 0 0; line-height: 1.5; }
+/* "Did that dip count?" - a mounted live region that takes no room while silent. */
+.dip-status:empty { margin: 0; }
+.dip-status .dip-tally { color: var(--text-muted); }
+/* Outside a card it sits above the grid, where the banners go. */
+.app > .dip-status:not(:empty) { margin: 0 0 12px; }
 
 /* --- Meter --- */
 .meter { margin-top: 14px; }
@@ -225,9 +239,9 @@ header.masthead {
   background: var(--axis);
 }
 .meter-legend {
-  display: flex; justify-content: space-between;
+  display: flex; justify-content: space-between; gap: 8px;
   font-family: var(--mono);
-  font-size: 10px; color: var(--text-muted); margin-top: 6px;
+  font-size: 11px; color: var(--text-muted); margin-top: 6px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -245,7 +259,7 @@ header.masthead {
 }
 .readout .label {
   font-family: var(--mono);
-  font-size: 10px; color: var(--text-muted); text-transform: uppercase;
+  font-size: 11px; color: var(--text-muted); text-transform: uppercase;
   letter-spacing: 0.07em; margin-bottom: 4px;
 }
 .readout .value {
@@ -259,7 +273,7 @@ header.masthead {
 table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 th {
   text-align: left; font-family: var(--mono);
-  font-size: 10px; font-weight: 600; color: var(--text-muted);
+  font-size: 11px; font-weight: 600; color: var(--text-muted);
   text-transform: uppercase; letter-spacing: 0.06em;
   padding: 0 10px 7px 0; border-bottom: 1px solid var(--border);
   white-space: nowrap;
@@ -279,15 +293,17 @@ th.num.pad, td.num.pad { padding-right: 22px; }
   border-radius: 8px; padding: 8px 10px; font-size: 12px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
 }
+/* A day tooltip anchored by its foot: the Recharts wrapper is pinned at the top
+   of the plot and this box is lifted by its own height, clear of the marks. It
+   stays in flow - Recharts does not place a wrapper that measures no height. */
+.tip.tip-up { transform: translateY(-100%); }
 .tip .tip-t { color: var(--text-muted); margin-bottom: 4px; font-variant-numeric: tabular-nums; }
 .tip .tip-row { display: flex; align-items: center; gap: 6px; color: var(--text-primary); }
 .tip .swatch { width: 8px; height: 8px; border-radius: 2px; flex: none; }
 .tip .tip-note { color: var(--text-secondary); margin-top: 4px; }
+/* A patient's note is free text; it wraps inside the tooltip, not across the page. */
+.tip .tip-wrap { max-width: 250px; overflow-wrap: anywhere; }
 
-.banner {
-  background: var(--surface); border: 1px solid var(--status-critical);
-  border-radius: 10px; padding: 12px 16px; margin-bottom: 16px; font-size: 13px;
-}
 
 /* --- Range under a hero figure: the honest error bar, not decoration --- */
 .hero-range {
@@ -295,9 +311,14 @@ th.num.pad, td.num.pad { padding-right: 22px; }
   font-variant-numeric: tabular-nums;
 }
 .hero-range strong { color: var(--text-primary); font-weight: 600; }
-.banner-warn {
-  background: var(--surface); border: 1px solid var(--status-warning);
+
+/* The interlock. Same state as sev.probeRange's critical chip in
+   src/lib/severity.ts, said in a sentence - not a new colour path. */
+.banner-critical {
+  background: var(--surface); border: 1px solid var(--status-critical);
+  border-left-width: 4px;
   border-radius: 10px; padding: 12px 16px; margin-bottom: 16px; font-size: 13px;
+  line-height: 1.5;
 }
 
 /* --- Forms --- */
@@ -311,6 +332,12 @@ th.num.pad, td.num.pad { padding-right: 22px; }
   padding: 8px 10px; font-size: 13px; font-family: inherit;
 }
 .field-sm { flex: 0 1 96px; min-width: 80px; }
+/* A field with its label above it. The row bottom-aligns so the button sits
+   level with the inputs, not with the labels. */
+.form-row-labelled { align-items: flex-end; gap: 10px 8px; }
+.field-group { flex: 1 1 180px; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.field-group label { font-size: 12px; font-weight: 500; color: var(--text-secondary); }
+.field-group .field { flex: none; width: 100%; min-width: 0; height: 37px; }
 .field:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .btn {
   background: var(--accent); color: var(--on-accent); border: 0; border-radius: 8px;
@@ -332,7 +359,7 @@ th.num.pad, td.num.pad { padding-right: 22px; }
 /* --- Diagnostics panel: the sample-level signal, demoted from top billing --- */
 .diag summary {
   cursor: pointer; list-style: none;
-  font-family: var(--mono); font-size: 10px; letter-spacing: 0.07em;
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.07em;
   text-transform: uppercase; color: var(--text-muted);
   padding: 2px 0;
 }
@@ -363,7 +390,7 @@ th.num.pad, td.num.pad { padding-right: 22px; }
 }
 .tabs-note {
   margin-left: auto; padding-bottom: 10px;
-  font-family: var(--mono); font-size: 10px; letter-spacing: 0.05em;
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.05em;
   text-transform: uppercase; color: var(--text-muted);
 }
 @media (max-width: 620px) { .tabs-note { display: none; } }
@@ -385,6 +412,10 @@ th.num.pad, td.num.pad { padding-right: 22px; }
   gap: 16px; flex-wrap: wrap; margin-bottom: 16px;
 }
 .view-title { font-size: 22px; font-weight: 600; letter-spacing: -0.015em; margin: 0; }
+/* Focus is moved here on navigation so a screen reader announces the new view.
+   That is not a keyboard focus, and gets no ring; :focus-visible still does. */
+.view-title:focus { outline: none; }
+.view-title:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 3px; }
 .view-sub { font-size: 13px; color: var(--text-secondary); margin: 4px 0 0; }
 .view-sub strong { color: var(--text-primary); font-weight: 600; }
 .crumb {
@@ -404,7 +435,7 @@ th.num.pad, td.num.pad { padding-right: 22px; }
   box-shadow: var(--card-shadow);
 }
 .tile-label {
-  font-family: var(--mono); font-size: 10px; letter-spacing: 0.07em;
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.07em;
   text-transform: uppercase; color: var(--text-muted);
 }
 .tile-value {
@@ -444,6 +475,13 @@ th.num.pad, td.num.pad { padding-right: 22px; }
 .legend span { display: inline-flex; align-items: center; gap: 6px; }
 .legend i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
 .legend i.dash { width: 14px; height: 0; border-radius: 0; border-top: 1.5px dashed var(--text-secondary); }
+
+/* Small-multiple heading inside a chart card (VitalsTimeline). */
+.panel-label {
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.07em;
+  text-transform: uppercase; color: var(--text-muted); margin: 0 0 2px;
+}
+.panel-label:not(:first-child) { margin-top: 12px; }
 
 .grid.wide-narrow { grid-template-columns: 1.9fr 1fr; }
 @media (max-width: 860px) { .grid.wide-narrow { grid-template-columns: 1fr; } }
@@ -485,11 +523,202 @@ th.num.pad, td.num.pad { padding-right: 22px; }
 /* --- Meal rows open onto their bites --- */
 .meals tbody tr:not(.drill) { cursor: pointer; }
 .meals tbody tr:not(.drill):hover td { background: color-mix(in srgb, var(--grid) 45%, transparent); }
+/* The only keyboard and AT control for the drill-down: a 24px target. */
 .row-toggle {
-  border: 0; background: none; padding: 0 6px 0 0; cursor: pointer;
-  color: var(--text-muted); font-size: 10px; font-family: inherit;
+  border: 0; background: none; padding: 0; margin: -4px 4px -4px -6px; cursor: pointer;
+  min-width: 24px; min-height: 24px;
+  color: var(--text-secondary); font-size: 13px; font-family: inherit;
 }
 .row-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
 tr.drill > td { padding: 4px 0 16px; background: var(--plane); }
 tr.drill .card { border: 0; box-shadow: none; background: transparent; }
 .unit-sep { color: var(--text-muted); }
+
+/* --- Patient Today --- */
+/* A small heading inside a card: "This meal so far", "Logged today". */
+.sub-head {
+  font-size: 12px; font-weight: 600; margin: 0 0 6px;
+  color: var(--text-secondary); letter-spacing: 0.005em;
+}
+.sub-head span { font-weight: 500; color: var(--text-primary); }
+.hero-sub strong, .label-line strong { color: var(--text-primary); font-weight: 600; }
+.note.fine { font-size: 12px; color: var(--text-muted); }
+.empty a { color: var(--accent); }
+.btn-link:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+
+/* The alert slot's "What this means". Ink, not status colour: the border
+   already carries the tier. */
+.banner-critical details { margin-top: 6px; }
+.banner-critical summary {
+  cursor: pointer; width: fit-content;
+  font-size: 12.5px; color: var(--text-secondary); text-decoration: underline;
+}
+.banner-critical summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+.banner-critical details p { margin: 6px 0 0; color: var(--text-secondary); max-width: 760px; }
+
+/* Labels stacked above their fields; a hint under one field must not drag the
+   others down, so this row aligns to the top. */
+.form-row-top { align-items: flex-start; }
+.form-row-top .field-group { flex: 1 1 120px; }
+.form-row-top .field-group-wide { flex: 2 1 200px; }
+@media (max-width: 480px) { .form-row-top .field-group-wide { flex-basis: 100%; } }
+.field-hint { font-size: 11.5px; color: var(--text-muted); }
+
+/* "Log again": the patient's own past entries, one tap each. Taller than a
+   status chip because it is a touch target, and allowed to wrap on a phone. */
+.picks { margin: 0 0 14px; }
+.picks-label {
+  display: block; font-size: 12px; font-weight: 500;
+  color: var(--text-secondary); margin-bottom: 6px;
+}
+.pill.pick {
+  padding: 7px 11px; font-size: 12.5px; border-radius: 8px;
+  white-space: normal; text-align: left; line-height: 1.35;
+}
+.pill.pick:disabled { opacity: 0.45; cursor: not-allowed; }
+.receipt:empty { margin: 0; }
+.receipt .btn-link { color: var(--accent); font-weight: 600; }
+
+/* Self-reported entries: two lines each, at every width. A five-column table
+   does not fit a phone, and a list that changes shape at a breakpoint is two
+   lists to keep right. */
+.entry-list { list-style: none; margin: 0; padding: 0; }
+.entry-list li { padding: 9px 0; border-bottom: 1px solid var(--border); font-size: 12.5px; }
+.entry-list li:last-child { border-bottom: 0; }
+.entry-main { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.entry-main > span:first-child { color: var(--text-secondary); min-width: 0; overflow-wrap: anywhere; }
+.entry-main strong { color: var(--text-primary); font-weight: 500; }
+.entry-mg {
+  white-space: nowrap; color: var(--text-primary); font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.entry-meta {
+  display: flex; justify-content: space-between; gap: 12px; margin-top: 3px;
+  font-size: 11.5px; color: var(--text-muted);
+}
+details.earlier { margin-top: 10px; }
+details.earlier summary {
+  cursor: pointer; width: fit-content; font-size: 12px; color: var(--text-secondary);
+}
+details.earlier summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+details.earlier .entry-list { margin-top: 4px; }
+
+/* --- Clinician: tiles that filter, sodium sources, the meals table --- */
+/* A tile's parts are spans so the same markup is valid inside a button. */
+.tile-label, .tile-value, .tile-note { display: block; }
+/* A tile that filters the roster. Pressed is the UI accent, like .pill-btn -
+   it says the filter is on, never that the number is bad. */
+.tile-btn {
+  display: flex; flex-direction: column; align-items: stretch; justify-content: flex-start;
+  width: 100%; text-align: left; cursor: pointer;
+  font: inherit; color: inherit;
+}
+.tile-btn:hover { border-color: var(--axis); }
+.tile-btn[aria-pressed='true'] { border-color: var(--accent); background: var(--accent-soft); }
+.tile-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tile-btn .tile-label { display: flex; justify-content: space-between; gap: 8px; }
+.tile-hint { letter-spacing: 0.05em; color: var(--text-muted); white-space: nowrap; }
+.tile-btn:hover .tile-hint, .tile-btn[aria-pressed='true'] .tile-hint { color: var(--accent); }
+.filter-line { font-size: 12.5px; color: var(--text-secondary); margin: 0 0 12px; }
+.filter-line:empty { margin: 0; }
+.filter-line .btn-link { color: var(--accent); font-weight: 600; font-size: inherit; }
+.filter-line .btn-link:hover { color: var(--accent-hover); }
+
+/* On a phone four full-width tiles push the first patient off the first screen. */
+@media (max-width: 620px) {
+  .tiles { grid-template-columns: 1fr 1fr; gap: 10px; }
+  /* An odd tile out takes the row, not half of it beside a blank. */
+  .tiles > :last-child:nth-child(odd) { grid-column: 1 / -1; }
+  .tile { padding: 10px 12px; }
+  .tile-value { font-size: 22px; margin-top: 5px; }
+  .tile-value small { font-size: 11.5px; }
+  .tile-note { font-size: 11.5px; }
+}
+
+.banner-info a { color: var(--accent); font-weight: 600; }
+
+/* Columns a phone can do without. The figure they qualify stays. */
+@media (max-width: 720px) { .hide-narrow { display: none; } }
+
+/* Where the sodium comes from. The series colours appear as swatch and bar
+   only - which kind of row this is - and text stays in ink. */
+.sources-head { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.sources-head span { display: inline-flex; align-items: center; gap: 6px; }
+.sources-head i, .source-name .swatch {
+  width: 9px; height: 9px; border-radius: 2px; display: inline-block; flex: none;
+}
+.sources td { vertical-align: top; }
+.sources tbody tr:last-child td { border-bottom: 0; }
+.source-name { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+.source-name .swatch { transform: translateY(0.5px); }
+.source-sub, .source-flag { margin-left: 16px; }
+.source-sub { white-space: normal; }
+.source-flag { margin-top: 6px; }
+th.share-col, td.share-col { padding-left: 18px; padding-right: 18px; width: 30%; min-width: 96px; }
+.share { display: flex; align-items: center; gap: 10px; }
+.share-pct { flex: none; width: 34px; text-align: right; color: var(--text-primary); font-weight: 500; }
+.share-track { flex: 1; min-width: 40px; height: 6px; border-radius: 3px; background: var(--grid); }
+.share-fill { height: 100%; min-width: 2px; border-radius: 3px; }
+@media (max-width: 720px) {
+  th.share-col, td.share-col { width: 92px; min-width: 0; padding-right: 0; padding-left: 8px; }
+  .share { gap: 6px; }
+  .share-track { min-width: 24px; }
+  .source-flag .pill { white-space: normal; }
+}
+
+/* Meals table: the pace chip sits under its two numbers; the label check's
+   sentence opens the drill row. */
+.meals td { vertical-align: top; }
+.chip-line { margin-top: 5px; }
+/* The drill row is as wide as the table, which on a phone is wider than the
+   screen. Its contents are held to the visible width instead, so the sentence
+   and the chart are read without scrolling sideways. */
+.meals-scroll { container-type: inline-size; }
+tr.drill > td > * { position: sticky; left: 0; max-width: 100cqw; }
+.drill-note { margin: 8px 0 0; padding: 0 12px; max-width: min(784px, 100cqw); }
+/* On a phone the sodium figure has to be on the first screen of the table: the
+   claim drops under the product name and the inline chip may wrap. The bite
+   count is one tap away, in the row's own drill-down. */
+@media (max-width: 720px) {
+  .meals .claim { display: block; }
+  .meals .claim-sep { display: none; }
+  .meals .status-inline .pill { white-space: normal; }
+  .meals th, .meals td { padding-right: 8px; }
+  .meals th.num.pad, .meals td.num.pad { padding-right: 14px; }
+}
+.sources-other .share-pct { color: var(--text-secondary); font-weight: 400; }
+
+/* --- Review pass: tap targets, units, gutters, the today key --- */
+/* A text link is 16px tall; a thumb is not. The hit area grows by padding and
+   the negative margin gives the space back, so the layout does not move. */
+.btn-link {
+  display: inline-flex; align-items: center; min-height: 32px;
+  padding: 8px 6px; margin: -8px -6px;
+}
+/* A summary stays a list item, or it loses its disclosure triangle. */
+details.earlier summary { padding: 8px 6px; margin: -8px -6px; }
+details.earlier[open] summary { margin-bottom: 0; }
+/* The UA's "smaller" on a 12.5px table is 10.4px, under the 11px floor. */
+small { font-size: 11px; }
+/* Two right-aligned columns side by side need a gutter of their own: .num has
+   no right padding, so without it "0.62% 26 °C 10.0 g" reads as one figure.
+   Structural, so every table gets it and no table has to remember to ask. */
+th.num + th.num, td.num + td.num { padding-left: 12px; }
+/* The roster keeps its right padding on numeric cells, so it has one already. */
+.roster th.num + th.num, .roster td.num + td.num { padding-left: 0; }
+.show-phone { display: none; }
+@media (max-width: 480px) {
+  .hide-phone { display: none; }
+  .show-phone { display: inline; }
+}
+/* Two inputs under one label: systolic / diastolic. */
+.field-pair { display: flex; align-items: center; gap: 6px; }
+.field-group .field-pair .field { flex: 1 1 0; width: auto; }
+/* Inside a chip the text never wraps; the table scrolls instead. */
+.source-flag .pill { white-space: nowrap; }
+/* "Today so far" in the day chart's key: both series colours, faded like the bar. */
+.legend i.today-key {
+  background: linear-gradient(90deg, var(--series-salinity) 50%, var(--series-manual) 50%);
+  opacity: var(--today-opacity);
+}

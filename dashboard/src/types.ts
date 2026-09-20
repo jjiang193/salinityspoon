@@ -101,9 +101,20 @@ export interface Meal extends MealTotals {
 
 /** A meal as the clinician view receives it: checked against its own label. */
 export interface MealWithLabel extends Meal {
+  /** What the bowl was: weight-averaged NaCl-equivalent salinity, g/L. Null
+   *  only when no bite was weighed. Present whether or not a label was declared. */
+  mean_salinity_g_l: number | null;
+  /** mg per 240 mL reference serving at that salinity. */
+  mg_per_serving: number | null;
   label_claim_label: string | null;
   label_flagged: boolean;
+  /** 'info' is over the claim but under the 2x flag threshold - which is not
+   *  "consistent with label". 'none' also covers a meal with no check. */
+  label_severity: 'none' | 'info' | 'warning';
+  /** Measured mg per serving over the claim's limit. Null without an absolute claim. */
+  label_ratio: number | null;
   label_headline: string | null;
+  label_detail: string | null;
 }
 
 export interface Patient {
@@ -121,8 +132,14 @@ export interface DailyTotal {
   /** Local calendar day, YYYY-MM-DD. */
   date: string;
   measured_sodium_mg: number;
+  /** Linear sum of the day's per-bite ranges, mg. Overstates the spread. */
+  measured_sodium_mg_low: number;
+  measured_sodium_mg_high: number;
   manual_sodium_mg: number;
   total_sodium_mg: number;
+  /** Measured range plus self-reported food as entered (it carries no range). */
+  total_sodium_mg_low: number;
+  total_sodium_mg_high: number;
   bite_count: number;
   manual_count: number;
   /** False means nothing was logged - which is not the same as zero intake. */
@@ -170,10 +187,48 @@ export interface HealthLog {
   note: string | null;
 }
 
+/** One product the spoon measured, or one self-reported food. Mirrors
+ *  cohort.sources. The two kinds are never merged into one row. */
+export interface SodiumSourceItem {
+  kind: 'measured' | 'manual';
+  /** Null on a measured row means the product was never declared. */
+  name: string | null;
+  /** Manual only: the most recent entry's portion. */
+  portion: string | null;
+  /** Measured only. */
+  label_claim: string | null;
+  label_claim_label: string | null;
+  /** Meals, or entries. */
+  count: number;
+  sodium_mg: number;
+  /** Of LOGGED sodium in the range, 0-100. 0 when nothing was logged. */
+  share_pct: number;
+  /** Measured only: g/L NaCl-equivalent, weight-averaged over the group. */
+  mean_salinity_g_l: number | null;
+  /** Measured only: mg per 240 mL reference serving. */
+  mg_per_serving: number | null;
+  /** Meals in the group whose own label check is flagged. */
+  flagged_count: number;
+}
+
+/** Where the logged sodium came from, over the same days as `daily`. Sorted by
+ *  sodium_mg, descending - a sort order, not a score. */
+export interface SodiumSources {
+  days: number;
+  days_logged: number;
+  total_sodium_mg: number;
+  measured_sodium_mg: number;
+  manual_sodium_mg: number;
+  items: SodiumSourceItem[];
+}
+
 export interface PatientDetail extends PatientSummary {
   range: SummaryRange;
+  /** Newest 60. */
   meals: MealWithLabel[];
+  /** Newest 40. Sum `sources`, not this, for a range total. */
   manual_meals: ManualMeal[];
+  sources: SodiumSources;
 }
 
 export interface LabelCheck {
@@ -210,9 +265,15 @@ export interface ManualMeal {
 export interface IntakeToday {
   /** Measured by the spoon. */
   measured_sodium_mg: number;
+  /** Linear sum of today's per-bite ranges, mg. */
+  measured_sodium_mg_low: number;
+  measured_sodium_mg_high: number;
   /** Self-reported solids the probe cannot read. Never conflated with measured. */
   manual_sodium_mg: number;
   total_sodium_mg: number;
+  /** Measured range plus self-reported food as entered. */
+  total_sodium_mg_low: number;
+  total_sodium_mg_high: number;
   bite_count: number;
   manual_count: number;
   meal_count: number;
@@ -230,14 +291,29 @@ export interface IntakeToday {
 export type LiveMessage =
   // holder: this patient has the spoon. busy: someone else is mid-meal with it
   // (anonymous on purpose). mealId: this patient's open meal, for backfill.
-  | { type: 'spoon'; holder: boolean; busy: boolean; mealId: number | null }
+  // product_name, label_claim, label_check: what the holder declared for the
+  // open meal and how its mean sits against it; null / 'none' / null otherwise.
+  | { type: 'spoon'; holder: boolean; busy: boolean; mealId: number | null;
+      product_name: string | null; label_claim: string;
+      label_check: LabelCheck | null }
   | { type: 'sample'; received_at: string; mealId: number | null;
       patientId: string; data: Sample }
   | { type: 'bite'; received_at: string; mealId: number; patientId: string;
-      data: Bite; meal_totals: MealTotals; label_check?: LabelCheck }
+      data: Bite; meal_totals: MealTotals; label_check?: LabelCheck | null }
   | { type: 'meal_started'; mealId: number; patientId: string }
   | { type: 'meal_ended'; mealId: number; patientId: string }
   | { type: 'error'; detail: string };
+
+/** GET /api/spoon. */
+export interface SpoonStatus {
+  patientId: string;
+  mealId: number | null;
+  deviceId: string | null;
+  /** A sample has arrived since the backend started. Says nothing about now. */
+  spoon_seen: boolean;
+  /** Seconds since the last sample, by the server's clock. Null if none yet. */
+  sample_age_s: number | null;
+}
 
 /** A sample with the server's wall-clock stamp, ready to chart. */
 export interface ChartPoint {

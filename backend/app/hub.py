@@ -2,12 +2,13 @@
 
 import asyncio
 import json
+import time
 from datetime import datetime
 from typing import Any, Optional
 
 from fastapi import WebSocket
 
-from . import store
+from . import cohort, store
 
 # A meal is a run of bites with no gap longer than this.
 MEAL_GAP_MINUTES = 20.0
@@ -66,8 +67,10 @@ class MealTracker:
     """Groups bites into meals, and knows who is holding the spoon.
 
     Nobody wants to press Start before eating. The first bite after a long gap
-    opens a meal; subsequent bites join it. Meals close lazily — on the next
-    bite that falls outside the window, or explicitly via the API.
+    opens a meal; subsequent bites join it. Meals close on the next bite that
+    falls outside the window, explicitly via the API, or - for the ordinary end
+    of a meal, where the spoon is put down and nothing is pressed - by
+    close_if_idle, which main.py runs on a timer.
 
     Pressing Start is still allowed, and does two things the implicit path
     cannot: it says *whose* meal this is, and it lets a label claim be declared
@@ -85,16 +88,27 @@ class MealTracker:
         self.patient_id: str = store.DEFAULT_PATIENT_ID
         self.device_id: Optional[str] = None
         self._last_bite_at: Optional[datetime] = None
+        # When the open meal was last started or fed, by this process's clock.
+        # Bite timestamps are the device's, and a replayed recording carries
+        # old ones; idleness is about how long the server has heard nothing.
+        self._last_activity: Optional[float] = None
 
     # --- what each session is told about the spoon ---------------------------
     def spoon_state(self, patient_id: str) -> dict[str, Any]:
         holder = patient_id == self.patient_id
+        # What is in the bowl is the holder's alone. Everyone else gets the
+        # empty values, whether or not a meal is open.
+        mine = self.meal_id if holder else None
+        product_name, label_claim = store.get_meal_label(mine)
         return {
             "type": "spoon",
             "holder": holder,
             # Deliberately anonymous: see Hub.
             "busy": self.meal_id is not None and not holder,
-            "mealId": self.meal_id if holder else None,
+            "mealId": mine,
+            "product_name": product_name,
+            "label_claim": label_claim,
+            "label_check": cohort.live_label_check(mine),
         }
 
     async def announce(self) -> None:
@@ -124,6 +138,7 @@ class MealTracker:
             store.pair_device(bite["deviceId"], self.patient_id)
         self.device_id = bite["deviceId"]
         self._last_bite_at = ts
+        self._last_activity = time.monotonic()
         return self.meal_id
 
     async def start(self, patient_id: str) -> int:
@@ -138,6 +153,7 @@ class MealTracker:
         if self.device_id:
             store.pair_device(self.device_id, patient_id)
         self.meal_id = store.start_meal(self.device_id or "unassigned", patient_id)
+        self._last_activity = time.monotonic()
         await self._opened()
         return self.meal_id
 
@@ -152,6 +168,19 @@ class MealTracker:
         closed = await self._close()
         await self.announce()
         return closed
+
+    async def close_if_idle(self) -> Optional[int]:
+        """Close a meal nobody has fed for MEAL_GAP_MINUTES.
+
+        Without this a meal only ever closed on the *next* bite, so a patient
+        who simply stopped eating stayed "in a meal" until tomorrow's breakfast
+        - and every screen kept reporting a spoon gone silent mid-meal.
+        """
+        if self.meal_id is None or self._last_activity is None:
+            return None
+        if time.monotonic() - self._last_activity <= MEAL_GAP_MINUTES * 60:
+            return None
+        return await self.force_close()
 
     async def _opened(self) -> None:
         self.hub.last_bite = None
@@ -168,6 +197,7 @@ class MealTracker:
         store.close_meal(closed)
         self.meal_id = None
         self._last_bite_at = None
+        self._last_activity = None
         # The primer is for a tab opened mid-meal. Left in place, a tab opened
         # after the meal would be handed its last bite and show it as in progress.
         self.hub.last_bite = None

@@ -11,8 +11,8 @@
  * through total intake and is not ours to claim.
  */
 
-import { Bite } from '../types';
-import { FDA_DAILY_LIMIT_MG } from './sodium';
+import { Bite, MealTotals } from '../types';
+import { REFERENCE_SERVING_ML, SODIUM_FRACTION_OF_NACL } from './sodium';
 
 /** Bites considered when estimating the current rate. */
 const RATE_WINDOW = 6;
@@ -22,7 +22,7 @@ export interface Projection {
   mgPerBite: number;
   /** Sodium rate, mg per minute. Null until two bites have been logged. */
   mgPerMinute: number | null;
-  /** Whole bites remaining before today's total reaches the patient's target. */
+  /** Whole bites remaining before today's total reaches the patient's limit. */
   bitesToLimit: number | null;
   /** Minutes to the limit at the current rate. Null if the rate is unknown. */
   minutesToLimit: number | null;
@@ -30,8 +30,10 @@ export interface Projection {
   overLimit: boolean;
 }
 
+// limitMg has no default on purpose. The limit is the patient's own; a caller
+// that does not have it yet has nothing to project against.
 export function project(
-  bites: Bite[], consumedTodayMg: number, limitMg: number = FDA_DAILY_LIMIT_MG,
+  bites: Bite[], consumedTodayMg: number, limitMg: number,
 ): Projection | null {
   if (bites.length === 0) return null;
 
@@ -66,4 +68,63 @@ export function formatMinutes(minutes: number): string {
   const h = Math.floor(minutes / 60);
   const m = Math.round(minutes % 60);
   return m ? `${h} h ${m} min` : `${h} h`;
+}
+
+/** Spoonfuls before a bowl can be described. Two dips are still mostly noise. */
+const BOWL_MIN_BITES = 3;
+
+export interface Bowl {
+  /** The bowl so far: weight-averaged NaCl-equivalent salinity, g/L. */
+  g_l: number;
+  saltPct: number;
+  /** mg of sodium in a 240 mL reference serving at that salinity. */
+  mgPerServing: number;
+  /** Eaten so far, at 1 g = 1 mL - the assumption the sodium figures make. */
+  mlEaten: number;
+  /** How much more of this bowl fits under today's limit. The three "left"
+   *  values are null when today's total is unknown and 0 once it is reached. */
+  mlLeft: number | null;
+  /** From the top of the per-spoonful range, so the cautious end. */
+  spoonfulsLow: number | null;
+  spoonfulsHigh: number | null;
+}
+
+/**
+ * This bowl, in the terms of what is left today.
+ *
+ * Pure arithmetic over the meal's totals, and the same formula as
+ * cohort.label_check on the server: sodium over weight gives the bowl's mean
+ * salinity, and mean salinity gives mg per serving. It says how much fits, never
+ * how fast to eat it - no claim about eating speed is made here.
+ *
+ * Null until there is enough to say anything: fewer than three spoonfuls, or
+ * nothing weighed.
+ */
+export function bowl(totals: MealTotals, remainingMg: number | null): Bowl | null {
+  if (totals.biteCount < BOWL_MIN_BITES || totals.total_weight_g <= 0) return null;
+
+  const mgPerMl = totals.totalSodium / totals.total_weight_g;
+  const g_l = mgPerMl / SODIUM_FRACTION_OF_NACL;
+  const base = {
+    g_l,
+    saltPct: g_l / 10,
+    mgPerServing: g_l * SODIUM_FRACTION_OF_NACL * REFERENCE_SERVING_ML,
+    mlEaten: totals.total_weight_g,
+  };
+
+  if (remainingMg === null)
+    return { ...base, mlLeft: null, spoonfulsLow: null, spoonfulsHigh: null };
+  if (remainingMg <= 0)
+    return { ...base, mlLeft: 0, spoonfulsLow: 0, spoonfulsHigh: 0 };
+
+  const perSpoonHigh = totals.total_sodium_mg_high / totals.biteCount;
+  const perSpoonLow = totals.total_sodium_mg_low / totals.biteCount;
+  return {
+    ...base,
+    // A bowl that reads no salt at all never reaches the limit: Infinity, which
+    // the card says as "more than 8 cups".
+    mlLeft: remainingMg / mgPerMl,
+    spoonfulsLow: Math.floor(remainingMg / perSpoonHigh),
+    spoonfulsHigh: Math.floor(remainingMg / perSpoonLow),
+  };
 }

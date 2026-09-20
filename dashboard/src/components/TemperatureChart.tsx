@@ -3,7 +3,7 @@ import {
   Tooltip, XAxis, YAxis,
 } from 'recharts';
 import { ChartPoint, PROBE_TEMP_MAX_C } from '../types';
-import { clockTime, relativeTick } from '../lib/time';
+import { clockTime, relativeTick, relativeTicks } from '../lib/time';
 
 function TempTip({ active, payload, label }: any) {
   if (!active || !payload?.length) return null;
@@ -33,6 +33,12 @@ function TempTip({ active, payload, label }: any) {
 export function TemperatureChart({ points }: { points: ChartPoint[] }) {
   const withTemp = points.filter((p) => p.tempC !== null);
   const now = withTemp.length ? withTemp[withTemp.length - 1].t : Date.now();
+  // Ticks every 10 degrees, so one always sits on the probe limit. Left to
+  // Recharts the axis read 15 / 30 / 56 with the limit between gridlines.
+  const temps = withTemp.map((p) => p.tempC!);
+  const lo = Math.min(10, Math.floor(Math.min(...temps) / 10) * 10);
+  const hi = Math.max(PROBE_TEMP_MAX_C + 10, Math.ceil(Math.max(...temps) / 10) * 10);
+  const yTicks = Array.from({ length: (hi - lo) / 10 + 1 }, (_, i) => lo + i * 10);
 
   return (
     <section className="card">
@@ -50,6 +56,7 @@ export function TemperatureChart({ points }: { points: ChartPoint[] }) {
             <CartesianGrid stroke="var(--grid)" strokeDasharray="0" vertical={false} />
             <XAxis
               dataKey="t" type="number" domain={['dataMin', 'dataMax']}
+              ticks={relativeTicks(withTemp[0].t, now)}
               tickFormatter={(t: number) => relativeTick(t, now)}
               stroke="var(--axis)" tickLine={false}
               tick={{ fill: 'var(--text-muted)', fontSize: 11 }} minTickGap={48}
@@ -58,10 +65,7 @@ export function TemperatureChart({ points }: { points: ChartPoint[] }) {
               stroke="var(--axis)" tickLine={false} axisLine={false} width={48}
               tick={{ fill: 'var(--text-muted)', fontSize: 11 }}
               tickFormatter={(v) => `${v}°`}
-              domain={[
-                (min: number) => Math.floor(Math.min(min, 15)),
-                (max: number) => Math.ceil(Math.max(max, PROBE_TEMP_MAX_C + 5)),
-              ]}
+              ticks={yTicks} interval={0} domain={[lo, hi]}
             />
             <Tooltip content={<TempTip />} cursor={{ stroke: 'var(--axis)', strokeWidth: 1 }} />
 
@@ -69,7 +73,7 @@ export function TemperatureChart({ points }: { points: ChartPoint[] }) {
               y={PROBE_TEMP_MAX_C}
               stroke="var(--limit-line)" strokeWidth={2} strokeDasharray="4 3"
               label={{ value: `probe limit ${PROBE_TEMP_MAX_C} °C`, position: 'insideTopRight',
-                       fill: 'var(--limit-line)', fontSize: 10 }}
+                       fill: 'var(--limit-line)', fontSize: 11 }}
             />
             <Line
               type="monotone" dataKey="tempC" dot={false} isAnimationActive={false}

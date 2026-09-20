@@ -1,6 +1,20 @@
 import { Bite, IntakeToday } from '../types';
 import { formatMinutes, project } from '../lib/projection';
-import { markerFor } from '../lib/severity';
+import { fmtMg } from '../lib/sodium';
+import * as sev from '../lib/severity';
+
+interface Props {
+  bites: Bite[];
+  intake: IntakeToday | null;
+  /** Today's total could not be fetched - which is not the same as zero. */
+  intakeError: boolean;
+  /** The interlock is refusing bites, so there is no rate to project from. */
+  suspended: boolean;
+  /** A meal is open. Rate and time to limit are only true during one. */
+  inMeal: boolean;
+  /** Mid-meal and nothing is arriving: the spoon went quiet, or the server did. */
+  stalled: 'spoon' | 'server' | null;
+}
 
 /**
  * What the LED cannot do.
@@ -10,40 +24,54 @@ import { markerFor } from '../lib/severity';
  *
  * Pure arithmetic over measured bites. No claim about eating speed, because the
  * evidence there concerns total energy intake rather than sodium.
+ *
+ * It projects against the patient's own limit and today's real total, or not at
+ * all: with neither to hand it says so instead of counting down from a guess.
  */
 export function SodiumProjection({
-  bites, intake,
-}: { bites: Bite[]; intake: IntakeToday | null }) {
-  const p = project(bites, intake?.total_sodium_mg ?? 0, intake?.sodiumTarget);
-
-  if (!p) {
-    return (
-      <section className="card">
-        <h2>Pace</h2>
-        <p className="cap">Projection from measured bites</p>
-        <p className="empty">Log a bite to project.</p>
-      </section>
-    );
-  }
-
-  const critical = p.overLimit || (p.bitesToLimit !== null && p.bitesToLimit <= 5);
-  const marker = markerFor(
-    critical
-      ? { tier: 'attention', label: '', role: 'critical' }
-      : { tier: 'ambient', label: '' },
+  bites, intake, intakeError, suspended, inMeal, stalled,
+}: Props) {
+  const idle = (message: string) => (
+    <section className="card">
+      <h2>Projection</h2>
+      <p className="cap">From measured bites, against today's limit</p>
+      <p className="empty">{message}</p>
+    </section>
   );
+
+  if (intake === null) {
+    return idle(intakeError
+      ? "Today's total is unavailable, so nothing is projected."
+      : "Loading today's total…");
+  }
+  // A countdown that keeps ticking while every bite is refused is a false number.
+  if (suspended) return idle('Paused. Nothing is being counted while the liquid is out of range.');
+  // The same goes for a spoon nobody can hear: the last rate is not the current one.
+  if (stalled === 'spoon')
+    return idle('Paused. The spoon is not sending, so there is no current rate.');
+  if (stalled === 'server')
+    return idle("Paused. The server can't be reached, so there is no current rate.");
+
+  const p = project(bites, intake.total_sodium_mg, intake.sodiumTarget);
+  if (!p) return idle('Log a bite to project.');
+
+  // Whether the limit is close, and in what colour, is severity.ts's call.
+  const proximity = sev.limitProximity(p.overLimit, p.bitesToLimit);
+  const critical = proximity.tier === 'attention';
+  const window = Math.min(bites.length, 6);
 
   return (
     <section className="card">
-      <h2>Pace</h2>
+      <h2>Projection</h2>
       <p className="cap">
-        Projected from the last {Math.min(bites.length, 6)} bite
-        {Math.min(bites.length, 6) === 1 ? '' : 's'} at today's running total
+        {inMeal
+          ? <>Projected from the last {window} bite{window === 1 ? '' : 's'} at today's running total</>
+          : <>From the last meal's final {window} bite{window === 1 ? '' : 's'} · no meal in progress</>}
       </p>
 
       <p className="fig-sm">
         {p.overLimit ? 'Over' : p.bitesToLimit ?? '—'}
-        <span>{p.overLimit ? 'daily target reached' : 'bites to your daily target'}</span>
+        <span>{p.overLimit ? "today's limit reached" : "bites left before today's limit"}</span>
       </p>
 
       <div className="rule" />
@@ -56,13 +84,13 @@ export function SodiumProjection({
         <div className="readout">
           <div className="label">Rate</div>
           <div className="value">
-            {p.mgPerMinute !== null ? p.mgPerMinute.toFixed(0) : '—'} <small>mg/min</small>
+            {inMeal && p.mgPerMinute !== null ? p.mgPerMinute.toFixed(0) : '—'} <small>mg/min</small>
           </div>
         </div>
         <div className="readout">
-          <div className="label">Time to target</div>
+          <div className="label">Time to limit</div>
           <div className="value">
-            {p.overLimit ? '—'
+            {p.overLimit || !inMeal ? '—'
               : p.minutesToLimit !== null ? formatMinutes(p.minutesToLimit)
               : '—'}
           </div>
@@ -76,10 +104,10 @@ export function SodiumProjection({
 
       {critical && (
         <p className="note attention">
-          <span className="mk">{marker}</span>
+          <span className="mk" data-status={proximity.role}>{sev.markerFor(proximity)}</span>
           {p.overLimit
-            ? `Today's intake is past the ${(intake?.sodiumTarget ?? 2300).toLocaleString()} mg target.`
-            : `At this rate today's target arrives within ${p.bitesToLimit} more bites.`}
+            ? `Today's intake is past the ${fmtMg(intake.sodiumTarget)} mg limit.`
+            : `At this ${inMeal ? 'rate' : 'concentration'} today's limit arrives within ${p.bitesToLimit} more bites.`}
         </p>
       )}
     </section>

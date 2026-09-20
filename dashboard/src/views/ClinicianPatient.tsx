@@ -1,16 +1,22 @@
 import { useState } from 'react';
-import { PatientDetail, SummaryRange } from '../types';
+import { HealthLog, PatientDetail, SummaryRange } from '../types';
 import { TelemetryState } from '../hooks/useTelemetry';
 import { useApi, useSticky } from '../hooks/useApi';
-import { href } from '../lib/route';
+import { href, usePageTitle } from '../lib/route';
+import { errorText } from '../lib/api';
+import { REFERENCE_SERVING_ML, fmtMg } from '../lib/sodium';
 import { dayAndTime, daysAgo } from '../lib/time';
 import * as sev from '../lib/severity';
 import { Chip } from '../components/Chip';
 import { DailyTrendChart } from '../components/DailyTrendChart';
-import { HealthLogCard } from '../components/HealthLogCard';
 import { MealsTable } from '../components/MealsTable';
+import { SodiumSources } from '../components/SodiumSources';
 import { StatTile } from '../components/StatTile';
 import { TargetEditor } from '../components/TargetEditor';
+import { VitalsTimeline } from '../components/VitalsTimeline';
+
+/** Covers a month of several readings a day. */
+const LOG_LIMIT = 120;
 
 /**
  * One patient, as their clinician sees them: the trend, the meals behind it,
@@ -25,22 +31,58 @@ export function ClinicianPatient({ patientId, telemetry }: {
     `/v1/patients/${patientId}/summary?range=${range}`, telemetry.revision,
   );
   const p = useSticky(data, patientId);
+  // Asked for once: the timeline draws it and lists it. The endpoint is capped
+  // by rows, not by date, so the timeline is told the cap and can say when the
+  // answer may stop short of the period.
+  const log = useApi<HealthLog[]>(
+    `/v1/patients/${patientId}/health-log?limit=${LOG_LIMIT}`, telemetry.revision,
+  );
+  const logError = log.error !== null && !log.data;
+  usePageTitle(p ? `${p.name} · Clinician` : null);
 
   const back = (
     <a className="crumb" href={href({ view: 'clinician', patientId: null })}>← All patients</a>
   );
 
   if (loading && !p) return <>{back}<p className="empty">Loading…</p></>;
-  if (!p) return <>{back}<p className="empty">Could not load this patient{error && ` (${error})`}.</p></>;
+  if (!p) {
+    return (
+      <>
+        {back}
+        <p className="empty" role="status">
+          {error === 'Not found'
+            ? `There is no patient with the id “${patientId}”.`
+            : `Could not load this patient. ${errorText(new Error(error ?? ''))}`}
+        </p>
+      </>
+    );
+  }
 
-  const status = sev.rosterStatus({
+  const input: sev.RosterInput = {
     pctToday: p.pct_of_target_today,
     pctAvg: p.pct_of_target_avg,
     daysSinceLog: p.days_since_log,
     flaggedMeals: p.flagged_meals,
     upwardDrift: p.upward_drift,
     driftPct: p.drift_pct,
-  });
+    windowDays: p.window_days,
+  };
+  const status = sev.rosterStatus(input);
+  // The chip says the first reason. The rest are said too, as text: a patient
+  // over target today can also be trending up, and that is worth a sentence,
+  // not a second chip.
+  const reasons = sev.rosterReasons(input);
+  const others = reasons.slice(1);
+  // "Which food" for a label flag. The other reasons have their figure in the
+  // tiles; this one's was only in the sources table, two charts further down.
+  // Text, not a second chip: the chip and the table row already carry the colour.
+  const flaggedSources = reasons.some((r) => r.key === 'label-flag')
+    ? p.sources.items.filter((i) => i.flagged_count > 0) : [];
+
+  // Audit #1 on the third view: a meal is open and the spoon has stopped
+  // sending. Ambient text, not colour - the clinician cannot switch it on.
+  const spoonSilent = telemetry.connected && !telemetry.spoonLive
+    && telemetry.silentForS !== null;
 
   const drift = p.drift_pct === null
     ? 'not enough logged days to compare with the week before'
@@ -51,11 +93,26 @@ export function ClinicianPatient({ patientId, telemetry }: {
       {back}
       <div className="view-head">
         <div>
-          <h2 className="view-title">{p.name}</h2>
+          <h2 className="view-title" tabIndex={-1}>{p.name}</h2>
           <p className="view-sub">
             {[p.age && `${p.age} years`, p.condition].filter(Boolean).join(' · ')}
-            {' · '}target {p.sodiumTarget.toLocaleString()} mg/day
+            {' · '}target {fmtMg(p.sodiumTarget)} mg/day
           </p>
+          {others.length > 0 && (
+            <p className="view-sub">Also: {others.map((r) => r.text).join(' · ')}</p>
+          )}
+          {flaggedSources.length > 0 && (
+            <p className="view-sub">
+              Label flag: {flaggedSources.map((i) => (
+                `${i.name ?? 'an undeclared product'}`
+                + (i.label_claim_label ? ` (labelled ${i.label_claim_label.toLowerCase()})` : '')
+                + `, ${i.flagged_count} of ${i.count} meal${i.count === 1 ? '' : 's'}`
+                + (i.mg_per_serving !== null
+                  ? `, typically ${fmtMg(i.mg_per_serving)} mg per ${REFERENCE_SERVING_ML} mL` : '')
+              )).join('; ')}
+              {' '}in the last {p.sources.days} days. See the sources below.
+            </p>
+          )}
         </div>
         <div className="pill-row">
           <Chip indicator={status} />
@@ -69,19 +126,35 @@ export function ClinicianPatient({ patientId, telemetry }: {
 
       {p.in_meal && telemetry.mealTotals && (
         <div className="banner-info">
-          <strong>Eating now.</strong>{' '}
-          {telemetry.mealTotals.biteCount} bites,{' '}
-          {Math.round(telemetry.mealTotals.totalSodium).toLocaleString()} mg so far this meal
-          {' '}(range {Math.round(telemetry.mealTotals.total_sodium_mg_low).toLocaleString()}–
-          {Math.round(telemetry.mealTotals.total_sodium_mg_high).toLocaleString()}).{' '}
+          <strong>
+            {spoonSilent
+              ? `Meal open, spoon silent for ${sev.silentFor(telemetry.silentForS ?? 0)}.`
+              : 'Eating now.'}
+          </strong>{' '}
+          {spoonSilent && 'Last received: '}
+          {telemetry.mealTotals.biteCount} bite{telemetry.mealTotals.biteCount === 1 ? '' : 's'},{' '}
+          {fmtMg(telemetry.mealTotals.totalSodium)} mg {spoonSilent ? 'this meal' : 'so far this meal'}
+          {' '}(range {fmtMg(telemetry.mealTotals.total_sodium_mg_low)}–
+          {fmtMg(telemetry.mealTotals.total_sodium_mg_high)}).{' '}
           <a href={href({ view: 'live' })}>Watch live</a>
         </div>
       )}
 
       <div className="tiles">
+        {/* Today is excluded from every average on this page, so without this
+            tile a chip can say "Over target today" with no figure behind it. */}
+        <StatTile
+          label="Today so far"
+          value={p.today.logged ? fmtMg(p.today.total_sodium_mg) : '—'}
+          unit={p.today.logged ? 'mg' : undefined}
+          note={p.today.logged
+            ? `${p.today.total_sodium_mg_high > p.today.total_sodium_mg_low
+                ? `range ${fmtMg(p.today.total_sodium_mg_low)}–${fmtMg(p.today.total_sodium_mg_high)} · `
+                : ''}${p.pct_of_target_today.toFixed(0)}% of target · not part of the averages`
+            : 'nothing logged yet today'} />
         <StatTile
           label={`${p.window_days}-day average`}
-          value={p.avg_sodium_mg === null ? '—' : Math.round(p.avg_sodium_mg).toLocaleString()}
+          value={p.avg_sodium_mg === null ? '—' : fmtMg(p.avg_sodium_mg)}
           unit={p.avg_sodium_mg === null ? undefined : 'mg'}
           note={p.pct_of_target_avg === null
             ? 'no logged days in the window'
@@ -104,18 +177,28 @@ export function ClinicianPatient({ patientId, telemetry }: {
       </div>
 
       <div className="grid wide-narrow" style={{ marginTop: 16 }}>
-        <DailyTrendChart daily={p.daily} targetMg={p.sodiumTarget}
-                         range={range} onRange={setRange} />
-        <TargetEditor patient={p} onSaved={telemetry.bump} />
+        <div className="stack">
+          <DailyTrendChart daily={p.daily} targetMg={p.sodiumTarget}
+                           range={range} onRange={setRange} syncId="days" />
+          <VitalsTimeline daily={p.daily} entries={log.data} error={logError} syncId="days"
+                          limit={LOG_LIMIT} />
+        </div>
+        {/* In a stack of one so the target card is not stretched to the charts'
+            height. The readings as a table are inside the timeline's card. */}
+        <div className="stack">
+          <TargetEditor patient={p} onSaved={telemetry.bump} />
+        </div>
+      </div>
+
+      <div style={{ marginTop: 16 }}>
+        <SodiumSources sources={p.sources} />
       </div>
 
       <div style={{ marginTop: 16 }}>
         <MealsTable meals={p.meals} />
       </div>
 
-      <div className="grid two" style={{ marginTop: 16 }}>
-        <HealthLogCard patientId={p.patientId} editable={false} revision={telemetry.revision} />
-
+      <div style={{ marginTop: 16 }}>
         <section className="card">
           <h2>Self-reported food</h2>
           <p className="cap">
@@ -135,7 +218,7 @@ export function ClinicianPatient({ patientId, telemetry }: {
                     <td className="primary nowrap">{dayAndTime(m.ts_utc)}</td>
                     <td>{m.name}</td>
                     <td>{m.portion ?? '—'}</td>
-                    <td className="num primary">{m.sodium_mg.toFixed(0)} mg</td>
+                    <td className="num primary">{fmtMg(m.sodium_mg)} mg</td>
                   </tr>
                 ))}
               </tbody>
