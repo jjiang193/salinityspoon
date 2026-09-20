@@ -1,4 +1,4 @@
-# NaTrack on AWS — phases 1–2: ingest, and the live session
+# NaTrack on AWS — phases 1–3: ingest, live session, and the API
 
 What `docs/natrack-system-design.pdf` calls ingest, as far as the durable write:
 
@@ -14,8 +14,14 @@ ingestBite ──► API Gateway WebSocket ──► clinician's browser
                wss://<api>/live?patientId=demo-1
 ```
 
-Later phases (not here): Cognito and the `/v1/...` API, the dashboard on
-Amplify, then hardening (KMS CMK, private subnets, Streams → `MealSummary`, S3
+…and read back through NaTrack's endpoints, behind Cognito:
+
+```
+browser ──Cognito id token──► HTTP API ──► query Lambda ──► DynamoDB
+          GET /v1/patients, /v1/patients/{id}/summary, …
+```
+
+Later phases (not here): the dashboard's own hosting, then hardening (KMS CMK, private subnets, Streams → `MealSummary`, S3
 archive, CloudTrail).
 
 The message is `bite/v2`, defined in `docs/telemetry-schema.md`. That file is
@@ -29,6 +35,8 @@ maps the firmware's struct onto it.
 | `template.yaml` | The stack: two tables, queue + dead-letter queue, the Lambda, the thing, its policy, the topic rule |
 | `ingest/app.py` | `ingestBite` — the cloud twin of `backend/app/main.py:_handle_bite`, and the live push |
 | `session/app.py` | The live session's connection book: who is watching which patient |
+| `query/app.py` | NaTrack's `/v1` endpoints, and the per-patient access check |
+| `scripts/seed-cloud.py` | The demo patient, the clinician assignment and two Cognito users |
 | `scripts/watch-session.py` | Watches a patient's session from the terminal, as the dashboard will |
 | `test_validate.py` | The refusal rules, no AWS needed: `python3 infra/test_validate.py` |
 | `sample-bite.json` | The load-cell spoon's bite, from the handoff doc |
@@ -105,6 +113,54 @@ one that has already gone (`GoneException`) is deleted on the spot.
 holding synthetic demo data and is not fine for real patients. Cognito on the
 `$connect` route is phase 3, together with the `canAccess` check the reference
 sheet calls the biggest real risk.
+
+## The API
+
+```bash
+python3 infra/scripts/seed-cloud.py          # once, after deploying
+```
+
+It prints a password for `patient@natrack.invalid` and `clinician@natrack.invalid`
+(synthetic people; `.invalid` never resolves, by RFC 2606). Then:
+
+```bash
+API=$(aws cloudformation describe-stacks --stack-name natrack \
+  --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text)
+CLIENT=$(aws cloudformation describe-stacks --stack-name natrack \
+  --query "Stacks[0].Outputs[?OutputKey=='UserPoolClientId'].OutputValue" --output text)
+TOKEN=$(aws cognito-idp initiate-auth --auth-flow USER_PASSWORD_AUTH \
+  --client-id "$CLIENT" --auth-parameters USERNAME=clinician@natrack.invalid,PASSWORD='…' \
+  --query 'AuthenticationResult.IdToken' --output text)
+curl -H "Authorization: Bearer $TOKEN" "$API/v1/patients?tz_offset_min=-240"
+```
+
+**`canAccess` is the whole security story.** Cognito proves *who* is asking;
+`query/app.py` decides whether they may see *this patient*. A patient's own id
+comes from their token (`custom:patientId`) and never from the request; a
+clinician must have an assignment row. Both were tested against the deployed
+stack:
+
+| | |
+|---|---|
+| No token | 401, before the Lambda runs |
+| Patient reading themselves | 200 |
+| Patient reading another patient | **404** — the same answer as a patient who does not exist, because confirming which ids are real is itself a leak |
+| Patient setting a sodium target | **403** — the reference sheet is explicit that targets are the clinician's |
+| `systolic: 400` | 400, "must be between 60 and 260" |
+
+**A clinician is identified by their verified email**, not `cognito:username`:
+the pool signs in by email, so the username is a UUID nobody can write an
+assignment against by hand.
+
+**Meals are derived on read**, by the contract's 20-minute rule, rather than
+read from `MealSummary` rows — phase 5 moves that to Streams, as the design
+specifies. The numbers are the same; the work happens on the way out instead of
+on the way in.
+
+**What the cloud does not have**, and the dashboard will show as blanks: meal
+labels and the label check, self-reported food, the recording controls, and the
+rest of the local backend's `/api` surface. The local backend is still the full
+article.
 
 ## Decisions worth knowing
 
