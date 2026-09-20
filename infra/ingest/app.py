@@ -1,7 +1,8 @@
 """ingestBite - the cloud twin of backend/app/main.py:_handle_bite.
 
 One bite/v2 message per SQS record (IoT Core -> rule -> queue). Validate it,
-find whose spoon it came from, store it exactly once.
+find whose spoon it came from, store it exactly once, then push it to anyone
+watching that patient's live session.
 
 Mirrors the local backend deliberately. If the contract in
 docs/telemetry-schema.md changes, change it here, in backend/app/schema.py and
@@ -22,6 +23,7 @@ from decimal import Decimal
 from typing import Any
 
 import boto3
+from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 
 log = logging.getLogger()
@@ -30,6 +32,12 @@ log.setLevel(logging.INFO)
 TABLE = boto3.resource("dynamodb").Table(os.environ["TELEMETRY_TABLE"])
 DEFAULT_PATIENT_ID = os.environ.get("DEFAULT_PATIENT_ID", "demo-1")
 RETENTION_DAYS = int(os.environ.get("BITE_RETENTION_DAYS", "90"))
+
+# The live session (phase 2). Empty until the WebSocket API exists, and the
+# push is best effort either way: the table is the source of truth, so a bite
+# nobody was watching is not a bite that was lost.
+WS_ENDPOINT = os.environ.get("WS_ENDPOINT", "")
+_ws = boto3.client("apigatewaymanagementapi", endpoint_url=WS_ENDPOINT) if WS_ENDPOINT else None
 
 BITE_SCHEMA = "bite/v2"
 
@@ -133,8 +141,8 @@ def patient_for(device_id: str) -> str:
     return DEFAULT_PATIENT_ID
 
 
-def store(payload: dict[str, Any], patient_id: str) -> bool:
-    """Write the bite. Returns False if it was already stored.
+def store(payload: dict[str, Any], patient_id: str) -> tuple[bool, dict[str, Any]]:
+    """Write the bite. Returns (stored, item); stored is False on a replay.
 
     SQS is at-least-once and the firmware resends after a Wi-Fi drop, so the
     same bite can arrive twice. bite_id is in the sort key: a replay collides
@@ -157,11 +165,53 @@ def store(payload: dict[str, Any], patient_id: str) -> bool:
             Item=json.loads(json.dumps(item), parse_float=Decimal),
             ConditionExpression="attribute_not_exists(SK)",
         )
-        return True
+        return True, item
     except ClientError as exc:
         if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
-            return False
+            return False, item
         raise
+
+
+def push_live(payload: dict[str, Any], patient_id: str) -> int:
+    """Send the stored bite to every socket watching this patient.
+
+    Best effort, and deliberately after the write: the durable record is the
+    point, the live view is a courtesy. A failure here is logged and dropped,
+    never retried - a replayed bite would be deduped away anyway, so the retry
+    would only delay the next one.
+    """
+    if not _ws:
+        return 0
+
+    try:
+        conns = TABLE.query(
+            KeyConditionExpression=Key("PK").eq(f"SESSION#{patient_id}") & Key("SK").begins_with("CONN#"),
+            ProjectionExpression="connectionId",
+        ).get("Items", [])
+    except ClientError:
+        log.exception("could not list live sessions for this patient")
+        return 0
+
+    message = json.dumps({
+        "type": "bite",
+        "patientId": patient_id,
+        "received_at": payload["receivedAt"],
+        "data": {k: v for k, v in payload.items() if k not in ("PK", "SK", "expiresAt")},
+    }, default=str).encode()
+
+    sent = 0
+    for c in conns:
+        cid = c["connectionId"]
+        try:
+            _ws.post_to_connection(ConnectionId=cid, Data=message)
+            sent += 1
+        except _ws.exceptions.GoneException:
+            # The viewer closed the tab and API Gateway never told us. Tidy up.
+            TABLE.delete_item(Key={"PK": f"SESSION#{patient_id}", "SK": f"CONN#{cid}"})
+            TABLE.delete_item(Key={"PK": f"CONN#{cid}", "SK": "SESSION"})
+        except ClientError:
+            log.exception("live push failed for one connection")
+    return sent
 
 
 def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
@@ -183,16 +233,18 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
 
         try:
             patient_id = patient_for(payload["deviceId"])
-            stored = store(payload, patient_id)
+            stored, item = store(payload, patient_id)
         except Exception:
             # Transient: retry, then the dead-letter queue after 5 attempts.
             log.exception("bite write failed (%s)", message_id)
             failures.append({"itemIdentifier": message_id})
             continue
 
+        # A replay is not pushed twice: the viewer already has it.
+        watching = push_live(item, patient_id) if stored else 0
         log.info(
-            "bite %s device=%s stored=%s",
-            payload["bite_id"], payload["deviceId"], stored,
+            "bite %s device=%s stored=%s live=%d",
+            payload["bite_id"], payload["deviceId"], stored, watching,
         )
 
     return {"batchItemFailures": failures}

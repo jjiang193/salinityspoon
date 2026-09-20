@@ -1,4 +1,4 @@
-# NaTrack on AWS — phase 1, the ingest spine
+# NaTrack on AWS — phases 1–2: ingest, and the live session
 
 What `docs/natrack-system-design.pdf` calls ingest, as far as the durable write:
 
@@ -7,9 +7,16 @@ spoon ──MQTT/TLS──► IoT Core ──rule──► SQS ──► Lambda 
        cert per device   devices/+/bites   bite-ingest   validate, dedupe   telemetry
 ```
 
-Later phases (not here): the API Gateway WebSocket live push, Cognito and the
-`/v1/...` API, the dashboard on Amplify, then hardening (KMS CMK, private
-subnets, Streams → `MealSummary`, S3 archive, CloudTrail).
+…and from the table out to anyone watching that patient live:
+
+```
+ingestBite ──► API Gateway WebSocket ──► clinician's browser
+               wss://<api>/live?patientId=demo-1
+```
+
+Later phases (not here): Cognito and the `/v1/...` API, the dashboard on
+Amplify, then hardening (KMS CMK, private subnets, Streams → `MealSummary`, S3
+archive, CloudTrail).
 
 The message is `bite/v2`, defined in `docs/telemetry-schema.md`. That file is
 the contract; this stack is plumbing around it. `docs/loadcell/aws-handoff.md`
@@ -20,7 +27,9 @@ maps the firmware's struct onto it.
 | File | |
 |---|---|
 | `template.yaml` | The stack: two tables, queue + dead-letter queue, the Lambda, the thing, its policy, the topic rule |
-| `ingest/app.py` | `ingestBite` — the cloud twin of `backend/app/main.py:_handle_bite` |
+| `ingest/app.py` | `ingestBite` — the cloud twin of `backend/app/main.py:_handle_bite`, and the live push |
+| `session/app.py` | The live session's connection book: who is watching which patient |
+| `scripts/watch-session.py` | Watches a patient's session from the terminal, as the dashboard will |
 | `test_validate.py` | The refusal rules, no AWS needed: `python3 infra/test_validate.py` |
 | `sample-bite.json` | The load-cell spoon's bite, from the handoff doc |
 | `scripts/create-device-cert.sh` | The spoon's certificate (CLI-only: the key is shown once) |
@@ -58,6 +67,37 @@ sam logs -n ingestBite --stack-name natrack --tail --profile natrack
 
 A refused bite logs `bite refused (...): 44.8 C outside probe range 0.0-40.0 C`
 and stores nothing. A replay logs `stored=False`.
+
+## The live session
+
+```bash
+python3 infra/scripts/watch-session.py demo-1     # leave this open
+infra/scripts/publish-test-bite.sh                # in another terminal
+```
+
+The bite should appear in the watcher about a second after it is stored.
+
+**The patient is a query string, not a path.** NaTrack writes the live view as
+`wss://.../session/{patientId}`, but a WebSocket API routes on the message body
+and cannot take a path parameter, so it is `?patientId=demo-1` instead. Phase 4
+can put NaTrack's spelling back with a custom domain if the dashboard wants it.
+
+**The push is best effort, and after the write.** The table is the source of
+truth; a bite nobody was watching is not a bite that was lost. A failed push is
+logged and dropped rather than retried — the bite is already durable, and a
+retry would only delay the next one. A replay is never pushed twice, because
+the write is what decides whether anything is new.
+
+**Connections are rows with a TTL.** `SESSION#<patientId>` / `CONN#<id>` says
+who is listening, `CONN#<id>` / `SESSION` says which patient a socket joined,
+because `$disconnect` is told nothing but the connection id. A socket API
+Gateway forgot to close expires in 12 hours instead of being pushed to for ever;
+one that has already gone (`GoneException`) is deleted on the spot.
+
+**No auth yet.** `$connect` takes any `patientId`, which is fine for a stack
+holding synthetic demo data and is not fine for real patients. Cognito on the
+`$connect` route is phase 3, together with the `canAccess` check the reference
+sheet calls the biggest real risk.
 
 ## Decisions worth knowing
 
@@ -122,6 +162,8 @@ Lambda, IoT Core. A `natrack-monthly` budget alerts at $20.
   the stack without hardware.
 - The device certificate is created by `scripts/create-device-cert.sh`, not by
   the stack. Keys stay in `~/natrack-certs/`, never in git.
-- `MealSummary` rows, the live WebSocket, the REST API and Cognito are phases
-  2–5. The local backend keeps serving the demo meanwhile, exactly as
-  `HANDOFF.md` intends.
+- `MealSummary` rows, the REST API and Cognito are phases 3–5. The local backend
+  keeps serving the demo meanwhile, exactly as `HANDOFF.md` intends.
+- The live session is unauthenticated, and `meal_totals` / `label_check` are not
+  in the pushed message: the cloud has no meal grouping until `MealSummary`
+  (phase 5). The local backend's session message carries both.
