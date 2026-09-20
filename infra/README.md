@@ -90,6 +90,26 @@ CloudWatch gets ids and outcomes. Log retention is 14 days.
 log line; a failed write is retried and reaches the dead-letter queue after 5
 attempts. `batchItemFailures` means one bad bite does not replay a whole batch.
 
+## What a real bite looks like here
+
+From the board on 2026-09-20, through `devices/spoon-01/bites`:
+
+```
+SK               BITE#2026-09-20T07:33:07.494Z#spoon-01#2
+patientId        demo-1          (added on ingest, from the device pairing)
+salinityIndex    13.04 mS/cm     ec_sample_count 125
+tempC            21.9            inside 0-40, so it was accepted
+salinity_g_l     7.18            quadratic curve, computed on the device
+weightGrams      31.2            sodiumEstimate 88.3 mg (48.5-128)
+pour_tilt_deg    78              the tip that confirmed the bite
+quality          0.8             flags ["tempUnsettled"]
+```
+
+21 s from pour to stored: the queue's batching window plus a cold start. Fine for
+the dashboard's history, which is why phase 2's WebSocket exists for the live
+view. `pour_tilt_deg` is a firmware extension (#9): the Lambda stores unknown
+keys and tolerates unknown flags, so the contract can grow without a redeploy.
+
 ## Cost
 
 Everything here is pay-per-use and idles at ~$0: on-demand DynamoDB, SQS,
@@ -97,8 +117,9 @@ Lambda, IoT Core. A `natrack-monthly` budget alerts at $20.
 
 ## Not done in phase 1
 
-- The firmware still has no Wi-Fi, NTP or MQTT client, so nothing publishes yet
-  except the test script.
+- ~~The firmware has no MQTT client~~ — it does now (#9), and a real bite from
+  the board has landed in this table. The test script still works for checking
+  the stack without hardware.
 - The device certificate is created by `scripts/create-device-cert.sh`, not by
   the stack. Keys stay in `~/natrack-certs/`, never in git.
 - `MealSummary` rows, the live WebSocket, the REST API and Cognito are phases
